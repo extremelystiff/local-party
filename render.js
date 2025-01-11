@@ -115,7 +115,7 @@ async function startStreamingTo(conn) {
             type: 'video-metadata',
             name: videoFile.name,
             size: videoFile.size,
-            type: videoFile.type
+            type: videoFile.type || 'video/webm'
         });
 
         // Stream the chunks
@@ -132,7 +132,9 @@ async function startStreamingTo(conn) {
             });
             
             offset += CHUNK_SIZE;
-            await new Promise(resolve => setTimeout(resolve, 10)); // Control sending rate
+            
+            // Add a small delay between chunks to prevent overwhelming the connection
+            await new Promise(resolve => setTimeout(resolve, 50));
         }
         
         console.log('Video streaming completed to peer:', conn.peer);
@@ -152,27 +154,66 @@ let videoType = '';
 function handleVideoMetadata(data) {
     console.log('Received video metadata:', data);
     expectedSize = data.size;
-    videoType = data.type;
+    videoType = data.type || 'video/webm';  // Ensure we have a default MIME type
     receivedChunks = [];
     receivedSize = 0;
     
     // Clear any existing video
-    videoPlayer.src = '';
+    if (videoPlayer.src) {
+        URL.revokeObjectURL(videoPlayer.src);
+        videoPlayer.src = '';
+    }
     videoFile = null;
+    
+    console.log('Preparing to receive video:', {
+        expectedSize,
+        videoType,
+        name: data.name
+    });
     
     notyf.success("Starting to receive video");
 }
 
 function handleVideoChunk(data) {
-    receivedChunks.push(data.data);
-    receivedSize += data.data.byteLength;
-    
-    if (receivedSize === expectedSize) {
-        const blob = new Blob(receivedChunks, { type: videoType });
-        const url = URL.createObjectURL(blob);
-        videoPlayer.src = url;
-        receivedChunks = [];
-        notyf.success("Video received successfully");
+    try {
+        receivedChunks.push(new Uint8Array(data.data));
+        receivedSize += data.data.byteLength;
+        
+        console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${Math.round(receivedSize/expectedSize*100)}%)`);
+        
+        if (receivedSize === expectedSize) {
+            console.log('All chunks received, creating video blob');
+            const blob = new Blob(receivedChunks, { type: videoType });
+            console.log('Created blob:', {
+                size: blob.size,
+                type: blob.type
+            });
+            
+            // Clean up old video source if it exists
+            if (videoPlayer.src) {
+                URL.revokeObjectURL(videoPlayer.src);
+            }
+            
+            const url = URL.createObjectURL(blob);
+            videoPlayer.src = url;
+            
+            // Verify the video is playable
+            videoPlayer.onloadeddata = () => {
+                console.log('Video loaded successfully');
+                notyf.success("Video received successfully");
+            };
+            
+            videoPlayer.onerror = (e) => {
+                console.error('Error loading video:', videoPlayer.error);
+                notyf.error("Error loading video: " + videoPlayer.error.message);
+            };
+            
+            receivedChunks = [];
+            receivedSize = 0;
+        }
+    } catch (error) {
+        console.error('Error handling video chunk:', error);
+        notyf.error("Error processing video chunk: " + error.message);
     }
 }
 
