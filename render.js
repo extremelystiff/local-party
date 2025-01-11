@@ -109,7 +109,7 @@ function setupConnection(conn) {
             pfp: '#f3dfbf'
         });
     });
-}
+
 
 // Stream video to peers
 async function startStreamingTo(conn) {
