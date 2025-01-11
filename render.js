@@ -371,47 +371,47 @@ function setupConnection(conn) {
                     handleChatMessage(data);
                     break;
 
-                case 'control':
-                    console.log('Received control command:', data);
-                    if (player) {
-                        try {
-                            const currentTime = player.currentTime();
-                            
-                            switch(data.action) {
-                                case 'play':
-                                    console.log('Remote play command received');
-                                    if (Math.abs(currentTime - data.time) > 0.5) {
-                                        player.currentTime(data.time);
-                                    }
-                                    player.play();
-                                    break;
-                                    
-                                case 'pause':
-                                    console.log('Remote pause command received');
-                                    player.pause();
-                                    if (Math.abs(currentTime - data.time) > 0.5) {
-                                        player.currentTime(data.time);
-                                    }
-                                    break;
-                                    
-                                case 'seek':
-                                    console.log(`Remote seek command received: ${data.time}`);
-                                    player.currentTime(data.time);
-                                    break;
-                            }
-                            
-                            // Log the action in chat
-                            const content = time(data.action, data.username || "Someone", data.time);
-                            append({
-                                name: "Local Party",
-                                content: content,
-                                pfp: "#f3dfbf"
-                            });
-                        } catch (e) {
-                            console.error('Error handling video control:', e);
-                        }
+case 'control':
+    console.log('Received control command:', data);
+    if (player) {
+        try {
+            const currentTime = player.currentTime();
+            
+            switch(data.action) {
+                case 'play':
+                    console.log('Remote play command received');
+                    // Only sync time if the difference is really large
+                    if (Math.abs(currentTime - data.time) > 3) {
+                        player.currentTime(data.time);
                     }
+                    player.play();
                     break;
+                    
+                case 'pause':
+                    console.log('Remote pause command received');
+                    player.pause();
+                    // Don't sync time on pause to avoid stuttering
+                    break;
+                    
+                case 'seek':
+                    console.log(`Remote seek command received: ${data.time}`);
+                    // For seeks, we do want to sync position
+                    player.currentTime(data.time);
+                    break;
+            }
+            
+            // Log the action in chat
+            const content = time(data.action, data.username || "Someone", data.time);
+            append({
+                name: "Local Party",
+                content: content,
+                pfp: "#f3dfbf"
+            });
+        } catch (e) {
+            console.error('Error handling video control:', e);
+        }
+    }
+    break;
             }
         } catch (error) {
             console.error('Error processing data:', error);
