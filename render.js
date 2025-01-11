@@ -25,6 +25,8 @@ let isBuffering = false;
 let receivedSize = 0;
 let expectedSize = 0;
 let videoType = '';
+let receivedSize = 0;
+let expectedSize = 0;
 
 // Initialize the application
 function initializeApp() {
@@ -181,15 +183,14 @@ function setupConnection(conn) {
                                     console.log('MediaSource ready for chunks');
                                 }
                                 
-                                // Always try to process next chunk when current update ends
-                                if (pendingChunks.length > 0) {
-                                    processNextChunk();
-                                } else if (metadataInitialized && mediaSourceReady) {
-                                    // If we've processed all chunks and received the complete signal
-                                    console.log('All chunks processed');
+                                // Check if we're done
+                                if (isStreamComplete()) {
+                                    console.log('All chunks processed and stream complete');
                                     if (mediaSource.readyState === 'open') {
                                         mediaSource.endOfStream();
                                     }
+                                } else if (pendingChunks.length > 0) {
+                                    processNextChunk();
                                 }
                             });
 
@@ -472,25 +473,38 @@ function processNextChunk() {
         console.log(`Processing chunk of size ${chunk.byteLength}`);
         
         sourceBuffer.appendBuffer(chunk);
+        receivedSize += chunk.byteLength;
         
         // Check buffer status
         if (sourceBuffer.buffered.length > 0) {
             const bufferedEnd = sourceBuffer.buffered.end(0);
             const bufferedStart = sourceBuffer.buffered.start(0);
             const bufferedDuration = bufferedEnd - bufferedStart;
-            console.log(`Buffer status: ${bufferedDuration.toFixed(2)}s buffered`);
+            console.log(`Buffer status: ${bufferedDuration.toFixed(2)}s buffered, Total received: ${receivedSize}`);
             
             // Enable play if we have enough buffer
             if (bufferedDuration >= 0.5) {
                 console.log('Enabling play button');
                 player.controlBar.playToggle.enable();
             }
+
+            // If buffer is getting full, remove old data
+            if (bufferedDuration > 30) { // Keep 30 seconds of buffer
+                const currentTime = player.currentTime();
+                if (currentTime > 10) { // Don't remove if we're near the start
+                    const removeEnd = currentTime - 5; // Keep 5 seconds before current time
+                    console.log(`Removing buffer from ${bufferedStart} to ${removeEnd}`);
+                    sourceBuffer.remove(bufferedStart, removeEnd);
+                }
+            }
         }
 
-        // Schedule the next chunk processing
-        if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-            setTimeout(processNextChunk, 0);
-        }
+        // Schedule next chunk processing
+        setTimeout(() => {
+            if (!sourceBuffer.updating && pendingChunks.length > 0) {
+                processNextChunk();
+            }
+        }, 0);
     } catch (e) {
         console.error('Error processing chunk:', e);
         
@@ -499,23 +513,28 @@ function processNextChunk() {
             if (sourceBuffer.buffered.length > 0) {
                 const currentTime = player.currentTime();
                 const removeStart = sourceBuffer.buffered.start(0);
-                const removeEnd = currentTime - 1; // Keep 1 second before current time
+                const removeEnd = Math.max(currentTime - 10, removeStart); // Keep 10 seconds before current time
                 
-                if (removeEnd > removeStart) {
-                    console.log(`Removing buffer from ${removeStart} to ${removeEnd}`);
-                    sourceBuffer.remove(removeStart, removeEnd);
-                }
+                console.log(`Buffer quota exceeded. Removing buffer from ${removeStart} to ${removeEnd}`);
+                sourceBuffer.remove(removeStart, removeEnd);
+                
+                // Re-add the chunk we failed to append
+                pendingChunks.unshift(chunk);
             }
-            // Re-add the chunk we failed to append
-            pendingChunks.unshift(chunk);
         } else {
-            // For other errors, log and continue
-            console.warn('Dropping problematic chunk due to error:', e);
+            console.warn('Error while appending chunk:', e);
+            // Don't drop the chunk, try again
+            pendingChunks.unshift(chunk);
         }
 
-        // Continue processing after a short delay
+        // Try again after a short delay
         setTimeout(processNextChunk, 100);
     }
+}
+
+// Add a function to check if we're done processing
+function isStreamComplete() {
+    return receivedSize >= expectedSize && pendingChunks.length === 0 && !sourceBuffer.updating;
 }
 
 // Add a buffer check function
@@ -525,11 +544,13 @@ function checkBuffer() {
     if (sourceBuffer.buffered.length > 0) {
         const currentTime = player.currentTime();
         const bufferedEnd = sourceBuffer.buffered.end(0);
+        const bufferedStart = sourceBuffer.buffered.start(0);
         
-        console.log(`Current time: ${currentTime}, Buffered end: ${bufferedEnd}`);
+        console.log(`Current time: ${currentTime}, Buffered: ${bufferedStart}-${bufferedEnd}`);
         
-        // If we're getting close to the end of our buffer, try processing more chunks
+        // If we're getting close to the end of our buffer and have more chunks, process them
         if (bufferedEnd - currentTime < 2 && pendingChunks.length > 0) {
+            console.log('Buffer running low, processing more chunks');
             processNextChunk();
         }
     }
