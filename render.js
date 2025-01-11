@@ -319,17 +319,13 @@ function initializePlayerEvents() {
 
     player.on('playing', () => {
         console.log('Video started playing');
-        mediaState.isBuffering = false;
-    });
-
-    player.on('pause', () => {
-        console.log('Video paused');
-        mediaState.isBuffering = false;
     });
 
     player.on('error', (error) => {
         console.error('Player error:', error);
-        mediaState.hasError = true;
+        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+            processNextChunk();
+        }
     });
 }
 
@@ -654,21 +650,40 @@ function processNextChunk() {
             const start = sourceBuffer.buffered.start(0);
             console.log(`Buffer: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
             
-            // Enable play button if we have enough buffer
+            // Enable play button once we have enough initial buffer
             if (end - start >= 0.5) {
-                player.controlBar.playToggle.enable();
+                if (player.controlBar && player.controlBar.playToggle) {
+                    player.controlBar.playToggle.enable();
+                }
             }
+            
+            // Schedule next chunk processing
+            sourceBuffer.addEventListener('updateend', () => {
+                if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                    processNextChunk();
+                } else if (pendingChunks.length === 0 && receivedSize >= expectedSize) {
+                    console.log('All chunks processed, ending stream');
+                    if (mediaSource && mediaSource.readyState === 'open') {
+                        mediaSource.endOfStream();
+                    }
+                }
+            }, { once: true });
         }
     } catch (e) {
         console.error('Error processing chunk:', e);
         if (e.name === 'QuotaExceededError') {
-            // Handle quota exceeded by removing old data
+            // Only remove old buffer if we really need to
             if (sourceBuffer.buffered.length > 0) {
+                const currentTime = player.currentTime();
                 const start = sourceBuffer.buffered.start(0);
-                const end = sourceBuffer.buffered.end(0);
-                sourceBuffer.remove(start, end - 10);
+                // Keep 30 seconds before current time if possible
+                const removeEnd = Math.max(start, currentTime - 30);
+                sourceBuffer.remove(start, removeEnd);
                 pendingChunks.unshift(chunk); // Put the chunk back
             }
+        } else {
+            // For other errors, try to continue with next chunk
+            console.warn('Skipping problematic chunk:', e);
         }
     }
 }
@@ -854,19 +869,15 @@ function setupBufferMonitoring() {
 
     player.on('timeupdate', () => {
         try {
-            if (!mediaState.isReady || !sourceBuffer || !mediaSource || 
-                mediaSource.readyState !== 'open' || !sourceBuffer.buffered) {
-                return;
-            }
-
-            if (sourceBuffer.buffered.length > 0) {
+            if (sourceBuffer && sourceBuffer.buffered.length > 0) {
                 const currentTime = player.currentTime();
                 const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
                 const bufferAhead = bufferedEnd - currentTime;
                 
-                console.log(`Buffer ahead: ${bufferAhead.toFixed(2)}s`);
+                console.log(`Buffer status: ${bufferAhead.toFixed(2)}s ahead, ${pendingChunks.length} chunks remaining`);
                 
-                if (bufferAhead < 3 && pendingChunks.length > 0) {
+                // Process more chunks if we're running low on buffer
+                if (bufferAhead < 10 && pendingChunks.length > 0 && !sourceBuffer.updating) {
                     processNextChunk();
                 }
             }
@@ -874,6 +885,7 @@ function setupBufferMonitoring() {
             console.warn('Buffer monitoring error:', e);
         }
     });
+
 
     player.on('seeking', () => {
         try {
