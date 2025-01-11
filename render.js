@@ -600,14 +600,19 @@ async function handleVideoMetadata(data, videoElement) {
 // Process next chunk in queue
 // Improved chunk processing function with better buffer management
 async function processNextChunk() {
-    if (!mediaState.isReady || !sourceBuffer || mediaSource.readyState !== 'open') {
-        console.log('Media components not ready');
+    if (!sourceBuffer || mediaSource.readyState !== 'open') {
+        console.log('Waiting for media components...');
+        return;
+    }
+
+    if (sourceBuffer.updating) {
+        console.log('Source buffer is updating, waiting...');
         return;
     }
 
     if (pendingChunks.length === 0) {
         if (receivedSize >= expectedSize) {
-            console.log('Stream complete');
+            console.log('All chunks processed');
             if (mediaSource.readyState === 'open') {
                 mediaSource.endOfStream();
             }
@@ -615,139 +620,66 @@ async function processNextChunk() {
         return;
     }
 
-    if (sourceBuffer.updating) {
-        return;
-    }
-
     try {
         const chunk = pendingChunks.shift();
         if (!chunk) return;
 
-        await appendBufferAsync(chunk);
-        
+        // Append the chunk to the source buffer
+        sourceBuffer.appendBuffer(chunk);
+
+        // Set up handler for this chunk
+        await new Promise((resolve, reject) => {
+            const handleUpdate = () => {
+                sourceBuffer.removeEventListener('updateend', handleUpdate);
+                sourceBuffer.removeEventListener('error', handleError);
+                resolve();
+            };
+
+            const handleError = (e) => {
+                sourceBuffer.removeEventListener('updateend', handleUpdate);
+                sourceBuffer.removeEventListener('error', handleError);
+                reject(e);
+            };
+
+            sourceBuffer.addEventListener('updateend', handleUpdate);
+            sourceBuffer.addEventListener('error', handleError);
+        });
+
         // Update buffer status
         const buffered = sourceBuffer.buffered;
         if (buffered.length > 0) {
-            const end = buffered.end(0);
+            const end = buffered.end(buffered.length - 1);
             const start = buffered.start(0);
             console.log(`Buffer: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
             
-            // Enable play if we have enough buffer
-            if (end - start >= 0.5) {
+            // Enable play when we have enough buffer
+            if (end - start >= 0.5 && player) {
                 player.controlBar.playToggle.enable();
             }
         }
 
-        // Continue processing chunks
+        // Continue processing chunks if there are more
         if (pendingChunks.length > 0) {
             requestAnimationFrame(processNextChunk);
         }
 
     } catch (error) {
-        console.error('Chunk processing error:', error);
+        console.error('Error processing chunk:', error);
+        // Try to recover by processing next chunk
+        if (pendingChunks.length > 0) {
+            setTimeout(processNextChunk, 1000);
+        }
     }
 }
-
 // Function to handle video metadata with proper initialization
 async function initializeMediaSource(videoElement, mimeType) {
-    if (mediaState.isInitializing) {
-        console.log('Already initializing media source');
-        return false;
-    }
-
-    mediaState.isInitializing = true;
-    mediaState.isReady = false;
-    mediaState.hasError = false;
-
     try {
-        // Cleanup existing MediaSource
-        if (mediaSource) {
-            try {
-                if (mediaSource.readyState === 'open') {
-                    mediaSource.endOfStream();
-                }
-                if (mediaState.mediaSourceUrl) {
-                    URL.revokeObjectURL(mediaState.mediaSourceUrl);
-                }
-            } catch (e) {
-                console.warn('Cleanup error:', e);
-            }
-        }
-
-        // Reset state
-        mediaSource = new MediaSource();
-        sourceBuffer = null;
-        pendingChunks = [];
-        receivedChunks = [];
-        receivedSize = 0;
-        isFirstChunk = true;
-
-        // Create and set up MediaSource
-        mediaState.mediaSourceUrl = URL.createObjectURL(mediaSource);
-
-        // Wait for MediaSource to open
-        await new Promise((resolve, reject) => {
-            const openTimeout = setTimeout(() => {
-                reject(new Error('MediaSource open timeout'));
-            }, 5000);
-
-            mediaSource.addEventListener('sourceopen', () => {
-                clearTimeout(openTimeout);
-                resolve();
-            }, { once: true });
-
-            // Set video source
-            videoElement.src = mediaState.mediaSourceUrl;
-        });
-
-        console.log('MediaSource opened successfully');
-
-        // Set up SourceBuffer
-        let finalMimeType = mimeType === 'video/webm' ? 
-            'video/webm;codecs="vp8,vorbis"' : mimeType;
-
-        sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
-        sourceBuffer.mode = 'sequence';
-
-        // Wait for SourceBuffer to be ready
-        await new Promise((resolve) => {
-            const checkBuffer = () => {
-                if (!sourceBuffer.updating) {
-                    resolve();
-                } else {
-                    setTimeout(checkBuffer, 50);
-                }
-            };
-            checkBuffer();
-        });
-
-        console.log('SourceBuffer ready');
-
-        // Set up video player
-        if (player) {
-            player.src({
-                src: mediaState.mediaSourceUrl,
-                type: finalMimeType
-            });
-            await new Promise(resolve => {
-                player.one('loadedmetadata', resolve);
-                player.load();
-            });
-        }
-
-        // Set up state
-        mediaState.mediaSourceReady = true;
-        mediaState.sourceBufferReady = true;
+        await setupMediaSource(videoElement, mimeType);
         mediaState.isReady = true;
-        mediaState.isInitializing = false;
-
-        console.log('Media initialization complete');
         return true;
-
     } catch (error) {
-        console.error('Media initialization error:', error);
+        console.error('Failed to initialize media source:', error);
         mediaState.hasError = true;
-        mediaState.isInitializing = false;
         return false;
     }
 }
@@ -878,10 +810,11 @@ function handleVideoChunk(data) {
     pendingChunks.push(chunk);
     receivedSize += chunk.byteLength;
 
-    console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes ` +
-                `(${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
+    const percentage = ((receivedSize / expectedSize) * 100).toFixed(1);
+    console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${percentage}%)`);
 
-    if (mediaState.isReady && !sourceBuffer.updating) {
+    // Start processing if we're not already
+    if (!sourceBuffer.updating) {
         processNextChunk();
     }
 }
@@ -1251,7 +1184,34 @@ form.addEventListener('submit', (e) => {
         messageInput.value = "";
     }
 });
+// Add better buffer monitoring
+function setupBufferMonitoring() {
+    if (!player) return;
 
+    player.on('timeupdate', () => {
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
+            const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+            const bufferAhead = bufferedEnd - currentTime;
+            
+            console.log(`Buffer ahead: ${bufferAhead.toFixed(2)}s`);
+            
+            // If buffer is running low, process more chunks
+            if (bufferAhead < 3 && pendingChunks.length > 0) {
+                processNextChunk();
+            }
+        }
+    });
+
+    // Add specific error handling
+    player.on('error', (e) => {
+        console.error('Player error:', e);
+        // Try to recover by reprocessing chunks
+        if (pendingChunks.length > 0) {
+            processNextChunk();
+        }
+    });
+}
 // Set up room code click-to-copy
 document.getElementById('roomCodeText').addEventListener('click', () => {
     const text = document.getElementById('roomCodeText').innerHTML;
