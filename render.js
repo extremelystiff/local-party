@@ -140,14 +140,26 @@ function setupConnection(conn) {
                         sourceBuffer = null;
                     }
 
+                    // Create new MediaSource
                     mediaSource = new MediaSource();
+                    console.log('Created new MediaSource');
+
+                    // Create the URL BEFORE adding event listener
                     const url = URL.createObjectURL(mediaSource);
+                    console.log('Created MediaSource URL:', url);
+
+                    // First set up the source in the player
+                    player.src({
+                        src: url,
+                        type: data.mimeType
+                    });
+                    console.log('Set player source');
                     
+                    // Then handle the sourceopen event
                     mediaSource.addEventListener('sourceopen', () => {
                         try {
                             console.log('MediaSource opened, state:', mediaSource.readyState);
                             
-                            // Use the MIME type from metadata
                             console.log('Creating source buffer with MIME type:', data.mimeType);
                             
                             // First try with the provided MIME type
@@ -161,25 +173,22 @@ function setupConnection(conn) {
                             }
                             
                             sourceBuffer.mode = 'sequence';
+                            console.log('Source buffer created and mode set to sequence');
                             
                             sourceBuffer.addEventListener('updateend', () => {
                                 if (!mediaSourceReady) {
                                     mediaSourceReady = true;
                                     console.log('MediaSource ready for chunks');
                                 }
-                                processNextChunk();
+                                if (pendingChunks.length > 0) {
+                                    processNextChunk();
+                                }
                             });
 
                             sourceBuffer.addEventListener('error', (e) => {
                                 console.error('SourceBuffer error:', e);
                             });
 
-                            // Set player source after buffer is ready
-                            player.src({
-                                src: url,
-                                type: data.mimeType
-                            });
-                            
                             metadataInitialized = true;
                             console.log('Metadata initialized, ready for chunks');
                             
@@ -192,6 +201,14 @@ function setupConnection(conn) {
                             console.error('Error in sourceopen:', e);
                             notyf.error("Error setting up video: " + e.message);
                         }
+                    });
+
+                    mediaSource.addEventListener('sourceended', () => {
+                        console.log('MediaSource ended');
+                    });
+
+                    mediaSource.addEventListener('sourceclose', () => {
+                        console.log('MediaSource closed');
                     });
 
                     // Handle MediaSource errors
