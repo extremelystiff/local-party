@@ -31,42 +31,44 @@ function initializeApp() {
     console.log('Initializing app...');
     
     try {
-        // Initialize video.js player with autoplay disabled
-        player = videojs('video-player', {
-            controls: true,
-            preload: 'auto',
-            fluid: true,
-            playsinline: true,
-            html5: {
-                vhs: {
-                    overrideNative: true
-                },
-                nativeVideoTracks: false,
-                nativeAudioTracks: false,
-                nativeTextTracks: false
-            }
-        });
-        
-        console.log('Video.js initialized');
-        
-        // Set up video player event handlers
-        player.on('error', function(error) {
-            console.error('Video.js error:', player.error());
-            if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
-                processNextChunk();
-            }
-        });
+        // Only initialize if player doesn't exist
+        if (!player) {
+            player = videojs('video-player', {
+                controls: true,
+                preload: 'auto',
+                fluid: true,
+                playsinline: true,
+                html5: {
+                    vhs: {
+                        overrideNative: true
+                    },
+                    nativeVideoTracks: false,
+                    nativeAudioTracks: false,
+                    nativeTextTracks: false
+                }
+            });
+            
+            console.log('Video.js initialized');
+            
+            // Set up video player event handlers
+            player.on('error', function(error) {
+                console.error('Video.js error:', player.error());
+                if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+                    processNextChunk();
+                }
+            });
 
-        player.on('waiting', function() {
-            console.log('Video waiting for data');
-            if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
-                processNextChunk();
-            }
-        });
+            player.on('waiting', function() {
+                console.log('Video waiting for data');
+                if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+                    processNextChunk();
+                }
+            });
 
-        // Add play/pause event listeners
-        player.on('play', videoControlsHandler);
-        player.on('pause', videoControlsHandler);
+            // Add play/pause event listeners
+            player.on('play', videoControlsHandler);
+            player.on('pause', videoControlsHandler);
+        }
 
         // Show landing page
         if (landingPage) {
@@ -216,12 +218,9 @@ function handleVideoMetadata(data) {
         mediaSource = new MediaSource();
         const url = URL.createObjectURL(mediaSource);
         
-        // Set up MediaSource
         mediaSource.addEventListener('sourceopen', () => {
             try {
                 console.log('MediaSource opened, setting up source buffer');
-                
-                // Create source buffer
                 sourceBuffer = mediaSource.addSourceBuffer(videoType);
                 sourceBuffer.mode = 'sequence';
                 
@@ -233,8 +232,6 @@ function handleVideoMetadata(data) {
                 sourceBuffer.addEventListener('error', (e) => {
                     console.error('Source buffer error:', e);
                 });
-                
-                notyf.success("Starting to receive video");
                 
                 // Process any chunks that arrived before metadata was ready
                 if (pendingChunks.length > 0) {
@@ -252,61 +249,6 @@ function handleVideoMetadata(data) {
         player.src({
             src: url,
             type: videoType
-        });
-        
-        // Reset player state
-        player.currentTime(0);
-        player.pause();
-        
-    } catch (e) {
-        console.error('Error in handleVideoMetadata:', e);
-        notyf.error("Error setting up video stream: " + e.message);
-    }
-
-    
-    try {
-        // Reset state
-        pendingChunks = [];
-        receivedSize = 0;
-        
-        // Create new MediaSource
-        mediaSource = new MediaSource();
-        const url = URL.createObjectURL(mediaSource);
-        
-        mediaSource.addEventListener('sourceopen', () => {
-            try {
-                console.log('MediaSource opened, setting up source buffer');
-                
-                // Detect MIME type from the video file
-                const mimeType = data.type || 'video/webm;codecs="vp8,opus"';
-                console.log('Using MIME type:', mimeType);
-                
-                // Create source buffer
-                sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                sourceBuffer.mode = 'sequence';  // Changed to sequence mode
-                
-                // Add event listeners
-                sourceBuffer.addEventListener('updateend', () => {
-                    console.log('Source buffer updated, checking queue');
-                    processNextChunk();
-                });
-                
-                sourceBuffer.addEventListener('error', (e) => {
-                    console.error('Source buffer error:', e);
-                });
-                
-                notyf.success("Starting to receive video");
-            } catch (e) {
-                console.error('Error in sourceopen:', e);
-                notyf.error("Error setting up video stream: " + e.message);
-            }
-        });
-        
-        // Set up player
-        console.log('Setting player source to:', url);
-        player.src({
-            src: url,
-            type: data.type || 'video/webm'
         });
         
         // Reset player state
