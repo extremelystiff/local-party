@@ -465,54 +465,55 @@ async function processChunkBatch() {
 
     console.log(`Processing ${pendingChunks.length} chunks...`);
     
-    // Combine all chunks into one sequential buffer
-    const totalSize = pendingChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-    const combinedBuffer = new Uint8Array(totalSize);
-    let offset = 0;
-
-    for (const chunk of pendingChunks) {
-        combinedBuffer.set(new Uint8Array(chunk), offset);
-        offset += chunk.byteLength;
-    }
-
-    console.log(`Combined ${pendingChunks.length} chunks into ${totalSize} bytes`);
-
     try {
-        // Append the entire combined buffer
-        await new Promise((resolve, reject) => {
-            const handleUpdateEnd = () => {
-                sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                sourceBuffer.removeEventListener('error', handleError);
-                resolve();
-            };
+        // Process chunks sequentially with timestamps
+        let timestamp = 0;
+        for (let i = 0; i < pendingChunks.length; i++) {
+            const chunk = pendingChunks[i];
+            console.log(`Processing chunk ${i + 1}/${pendingChunks.length}, size: ${chunk.byteLength}, timestamp: ${timestamp}`);
 
-            const handleError = (err) => {
-                sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                sourceBuffer.removeEventListener('error', handleError);
-                reject(err);
-            };
+            await new Promise((resolve, reject) => {
+                const handleUpdateEnd = () => {
+                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                    sourceBuffer.removeEventListener('error', handleError);
+                    
+                    // Log buffer state after each append
+                    if (sourceBuffer.buffered.length > 0) {
+                        for (let j = 0; j < sourceBuffer.buffered.length; j++) {
+                            const start = sourceBuffer.buffered.start(j);
+                            const end = sourceBuffer.buffered.end(j);
+                            console.log(`Current buffer range ${j}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+                            
+                            // Calculate timestamp for next chunk based on current buffer
+                            if (j === sourceBuffer.buffered.length - 1) {
+                                timestamp = end;
+                            }
+                        }
+                    }
+                    resolve();
+                };
 
-            sourceBuffer.addEventListener('updateend', handleUpdateEnd);
-            sourceBuffer.addEventListener('error', handleError);
+                const handleError = (err) => {
+                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                    sourceBuffer.removeEventListener('error', handleError);
+                    reject(err);
+                };
 
-            sourceBuffer.appendBuffer(combinedBuffer);
-        });
+                sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+                sourceBuffer.addEventListener('error', handleError);
 
-        // Log the buffer ranges after append
-        if (sourceBuffer.buffered.length > 0) {
-            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
-            }
+                sourceBuffer.appendBuffer(chunk);
+            });
+
+            // Small delay between chunks to ensure proper sequencing
+            await new Promise(resolve => setTimeout(resolve, 10));
         }
 
-        // Clear pending chunks after successful append
-        pendingChunks = [];
+        console.log('All chunks processed successfully');
 
     } catch (e) {
-        console.error('Error appending combined buffer:', e);
+        console.error('Error processing chunks:', e);
         if (e.name === 'QuotaExceededError') {
-            // If quota exceeded, try processing in smaller batches
-            pendingChunks = [combinedBuffer.buffer];
             await handleQuotaExceeded();
         }
     }
@@ -560,10 +561,7 @@ async function appendChunkWithRetry(chunk, maxRetries = 3) {
     }
 }
 function setupSourceBuffer(mimeType) {
-    if (!mediaSource || mediaSource.readyState !== 'open') {
-        console.log('MediaSource not ready for setup');
-        return;
-    }
+    if (!mediaSource || mediaSource.readyState !== 'open') return;
 
     try {
         if (mimeType === 'video/webm') {
@@ -571,31 +569,22 @@ function setupSourceBuffer(mimeType) {
         }
         
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        sourceBuffer.mode = 'sequence';
-        console.log('Created source buffer in sequence mode');
+        // Change to 'segments' mode to handle discontinuous appends
+        sourceBuffer.mode = 'segments';
+        console.log('Created source buffer in segments mode');
         
-        // Remove existing updateend listener if any
-        const existingListener = sourceBuffer._updateEndListener;
-        if (existingListener) {
-            sourceBuffer.removeEventListener('updateend', existingListener);
-        }
-
-        // Add new updateend listener
-        sourceBuffer._updateEndListener = () => {
+        // Initialize timestamp offset to 0
+        sourceBuffer.timestampOffset = 0;
+        
+        sourceBuffer.addEventListener('updateend', () => {
             if (sourceBuffer.buffered.length > 0) {
-                console.log('Current buffer ranges:');
+                // Log all current ranges
                 for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                    console.log(`Range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                    console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
                 }
             }
-            
-            if (pendingChunks.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
-                console.log(`Processing next chunk batch (${pendingChunks.length} remaining)`);
-                processChunkBatch();
-            }
-        };
-        
-        sourceBuffer.addEventListener('updateend', sourceBuffer._updateEndListener);
+        });
+
         mediaState.isReady = true;
     } catch (e) {
         console.error('Error setting up source buffer:', e);
