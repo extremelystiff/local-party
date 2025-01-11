@@ -329,12 +329,13 @@ function onChangeFile() {
 
 // Video Control Handler
 function videoControlsHandler(e) {
-    if (!allowEmit) return;
+    if (!allowEmit || !player) return;
     
     const controlData = {
         type: 'control',
         action: e.type,
-        time: player.currentTime()
+        time: player.currentTime(),
+        username: localStorage.getItem("username")
     };
     
     Object.values(connections).forEach(conn => {
@@ -353,10 +354,6 @@ function videoControlsHandler(e) {
     allowEmit = false;
     setTimeout(() => { allowEmit = true; }, 500);
 }
-
-// Use Video.js events instead of native video events
-player.on('play', videoControlsHandler);
-player.on('pause', videoControlsHandler);
 
 // Event Listeners
 document.addEventListener("click", function(e) {
