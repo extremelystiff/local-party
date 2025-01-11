@@ -5,7 +5,7 @@ const notyf = new Notyf({ duration: 1500, position: { x: 'center', y: 'top' } })
 let peer = null;
 let connections = {};
 let videoFile = null;
-const CHUNK_SIZE = 256 * 1024; // 256KB chunks
+const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
 
 // UI elements
 const landingPage = document.getElementById("landing");
@@ -70,6 +70,9 @@ function initializeApp() {
             // Add play/pause event listeners
             player.on('play', videoControlsHandler);
             player.on('pause', videoControlsHandler);
+            // Set up buffer monitoring
+            setupBufferMonitoring();
+            console.log('Buffer monitoring initialized');
         }
 
         // Show landing page
@@ -461,97 +464,173 @@ function handleVideoMetadata(data) {
 
 
 // Process next chunk in queue
-function processNextChunk() {
-    if (!sourceBuffer || !mediaSource || sourceBuffer.updating || pendingChunks.length === 0) {
-        console.log('Skipping chunk processing:', {
-            hasSourceBuffer: !!sourceBuffer,
-            hasMediaSource: !!mediaSource,
-            isUpdating: sourceBuffer?.updating,
-            queueLength: pendingChunks.length
-        });
+// Improved chunk processing function with better buffer management
+async function processNextChunk() {
+    // Guard clauses for essential components
+    if (!sourceBuffer || !mediaSource) {
+        console.log('Media components not ready');
+        return;
+    }
+
+    // If we have no chunks to process, exit early
+    if (pendingChunks.length === 0) {
+        if (isStreamComplete()) {
+            console.log('Stream complete, no more chunks to process');
+            if (mediaSource.readyState === 'open') {
+                mediaSource.endOfStream();
+            }
+        }
+        return;
+    }
+
+    // If source buffer is updating, schedule next update
+    if (sourceBuffer.updating) {
+        console.log('Source buffer updating, scheduling next chunk');
+        setTimeout(processNextChunk, 10);
         return;
     }
 
     try {
-        // Get the next chunk
-        const chunk = pendingChunks.shift();
-        console.log(`Processing chunk of size ${chunk.byteLength}`);
-        
-        // Keep track of received data
-        receivedChunks.push(chunk);
-        receivedSize += chunk.byteLength;
-        
-        // For WebM, we need to process the first chunk differently
-        // as it contains important header information
-        if (isFirstChunk) {
-            isFirstChunk = false;
-            sourceBuffer.appendBuffer(chunk);
-        } else {
-            // For subsequent chunks, we'll try to append them normally
+        // Process multiple chunks at once if buffer is running low
+        const currentTime = player.currentTime();
+        const bufferedEnd = sourceBuffer.buffered.length ? 
+            sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1) : 0;
+        const bufferAhead = bufferedEnd - currentTime;
+
+        // Determine how many chunks to process based on buffer status
+        const chunksToProcess = bufferAhead < 2 ? 3 : 1;
+        console.log(`Buffer ahead: ${bufferAhead.toFixed(2)}s, Processing ${chunksToProcess} chunks`);
+
+        for (let i = 0; i < chunksToProcess && pendingChunks.length > 0; i++) {
+            const chunk = pendingChunks.shift();
+            
+            // Track received data
+            receivedChunks.push(chunk);
+            receivedSize += chunk.byteLength;
+            
+            // Special handling for first chunk (contains important header info)
+            if (isFirstChunk) {
+                isFirstChunk = false;
+                await appendBufferAsync(chunk);
+                continue;
+            }
+
+            // Handle quota exceeded error by combining remaining chunks
             try {
-                sourceBuffer.appendBuffer(chunk);
+                await appendBufferAsync(chunk);
             } catch (e) {
                 if (e.name === 'QuotaExceededError') {
-                    // If we hit the quota, combine the remaining chunks
                     console.log('Buffer quota exceeded, combining remaining chunks');
                     pendingChunks.unshift(chunk);
-                    const remainingData = new Uint8Array(receivedSize - chunk.byteLength);
-                    let offset = 0;
-                    for (const chunk of pendingChunks) {
-                        remainingData.set(new Uint8Array(chunk), offset);
-                        offset += chunk.byteLength;
-                    }
-                    pendingChunks = [remainingData.buffer];
-                    console.log('Combined remaining chunks into one buffer');
+                    await handleQuotaExceeded();
                 } else {
                     throw e;
                 }
             }
-        }
-        
-        // Check buffer status
-        if (sourceBuffer.buffered.length > 0) {
-            const bufferedEnd = sourceBuffer.buffered.end(0);
-            const bufferedStart = sourceBuffer.buffered.start(0);
-            const bufferedDuration = bufferedEnd - bufferedStart;
-            console.log(`Buffer status: ${bufferedDuration.toFixed(2)}s buffered, Total received: ${receivedSize}/${expectedSize}`);
-            
-            // Enable play if we have enough buffer
-            if (bufferedDuration >= 0.5) {
-                console.log('Enabling play button');
-                player.controlBar.playToggle.enable();
+
+            // Update buffer status
+            if (sourceBuffer.buffered.length > 0) {
+                const newBufferedEnd = sourceBuffer.buffered.end(0);
+                const bufferedDuration = newBufferedEnd - sourceBuffer.buffered.start(0);
+                console.log(`Buffer status: ${bufferedDuration.toFixed(2)}s buffered, ` +
+                          `Total received: ${receivedSize}/${expectedSize} (${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
+
+                // Enable play when we have enough buffer
+                if (bufferedDuration >= 0.5 && player.controlBar.playToggle.hasClass('vjs-disabled')) {
+                    console.log('Enabling play button');
+                    player.controlBar.playToggle.enable();
+                }
             }
         }
 
-        // Schedule next chunk
+        // Schedule next chunk processing if needed
         if (pendingChunks.length > 0) {
-            if (!sourceBuffer.updating) {
-                setTimeout(processNextChunk, 0);
-            } else {
-                sourceBuffer.addEventListener('updateend', () => {
-                    if (pendingChunks.length > 0) {
-                        setTimeout(processNextChunk, 0);
-                    } else if (receivedSize === expectedSize) {
-                        console.log('All data received and processed');
-                        // Only end the stream when we're truly done
-                        if (mediaSource.readyState === 'open') {
-                            mediaSource.endOfStream();
-                        }
-                    }
-                }, { once: true });
+            requestAnimationFrame(processNextChunk);
+        } else if (isStreamComplete()) {
+            console.log('All chunks processed successfully');
+            if (mediaSource.readyState === 'open') {
+                mediaSource.endOfStream();
             }
         }
-    } catch (e) {
-        console.error('Error processing chunk:', e);
-        // Put the chunk back and retry
-        pendingChunks.unshift(chunk);
+
+    } catch (error) {
+        console.error('Error processing chunk:', error);
+        // Put the failed chunk back and retry
+        if (chunk) {
+            pendingChunks.unshift(chunk);
+        }
         setTimeout(processNextChunk, 100);
     }
 }
 
-// Add a function to check if we're done processing
+// Helper function to handle quota exceeded error
+async function handleQuotaExceeded() {
+    // Combine all remaining chunks into one buffer
+    const totalSize = pendingChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    const combinedBuffer = new Uint8Array(totalSize);
+    let offset = 0;
+    
+    pendingChunks.forEach(chunk => {
+        combinedBuffer.set(new Uint8Array(chunk), offset);
+        offset += chunk.byteLength;
+    });
+    
+    // Replace pending chunks with combined buffer
+    pendingChunks = [combinedBuffer.buffer];
+    console.log('Combined remaining chunks into single buffer of size:', totalSize);
+}
+
+// Helper function to append buffer with promise
+function appendBufferAsync(chunk) {
+    return new Promise((resolve, reject) => {
+        try {
+            sourceBuffer.appendBuffer(chunk);
+            
+            function updateEndHandler() {
+                sourceBuffer.removeEventListener('updateend', updateEndHandler);
+                resolve();
+            }
+            
+            sourceBuffer.addEventListener('updateend', updateEndHandler);
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
+
+// Helper function to check if stream is complete
 function isStreamComplete() {
-    return receivedSize >= expectedSize && pendingChunks.length === 0 && !sourceBuffer.updating;
+    return receivedSize >= expectedSize && 
+           pendingChunks.length === 0 && 
+           !sourceBuffer.updating;
+}
+
+// Add buffer monitoring to the player
+function setupBufferMonitoring() {
+    if (!player) return;
+
+    // Monitor buffer status during playback
+    player.on('timeupdate', () => {
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
+            const bufferedEnd = sourceBuffer.buffered.end(0);
+            const bufferAhead = bufferedEnd - currentTime;
+            
+            // If buffer is running low, process more chunks
+            if (bufferAhead < 3 && pendingChunks.length > 0) {
+                console.log('Buffer running low, processing more chunks');
+                processNextChunk();
+            }
+        }
+    });
+
+    // Handle waiting events
+    player.on('waiting', () => {
+        console.log('Video waiting for data');
+        if (pendingChunks.length > 0) {
+            processNextChunk();
+        }
+    });
 }
 
 // Add a buffer check function
@@ -565,13 +644,32 @@ function checkBuffer() {
         
         console.log(`Current time: ${currentTime}, Buffered: ${bufferedStart}-${bufferedEnd}, Chunks remaining: ${pendingChunks.length}`);
         
-        // If we're getting close to the end of our buffer
-        if (bufferedEnd - currentTime < 2) {
+        // More aggressive buffering - start loading when we have less than 5 seconds ahead
+        if (bufferedEnd - currentTime < 5) {
             if (pendingChunks.length > 0) {
                 console.log('Buffer running low, processing more chunks');
-                processNextChunk();
+                // Process multiple chunks at once
+                for (let i = 0; i < 3 && pendingChunks.length > 0; i++) {
+                    if (!sourceBuffer.updating) {
+                        processNextChunk();
+                    }
+                }
             } else if (receivedSize < expectedSize) {
                 console.log('Waiting for more data...');
+                // Request more data from peer if needed
+                Object.values(connections).forEach(conn => {
+                    if (conn.open) {
+                        conn.send({ type: 'request-more-chunks' });
+                    }
+                });
+            }
+        }
+        
+        // If we're completely out of buffer, try to recover
+        if (currentTime >= bufferedEnd) {
+            console.log('Buffer depleted, attempting recovery');
+            if (pendingChunks.length > 0) {
+                processNextChunk();
             }
         }
     }
