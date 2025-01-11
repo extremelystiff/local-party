@@ -3,23 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <title>Local Party</title>
-    <link href="https://vjs.zencdn.net/7.10.2/video-js.css" rel="stylesheet" />
-    <script src="https://vjs.zencdn.net/7.10.2/video.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/inter-ui@3.15.1/inter.min.css">
-    <!-- Bootstrap -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-eOJMYsd53ii+scO/bJGFsiCZc+5NDVN2yr8+0RDqr0Ql0h+rP48ckxlpbzKgwra6" crossorigin="anonymous">
-    <!-- Fonts -->
-    <link rel="preconnect" href="https://fonts.gstatic.com">
+    
+    <!-- Styles first -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Lexend+Deca&display=swap" rel="stylesheet">
-    <!-- Icons -->
-    <script src="https://kit.fontawesome.com/abc159cb0a.js" crossorigin="anonymous"></script>
-    <link rel="shortcut icon" href="icon.png">
-    <!-- Notyf -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.css">
-    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
-    <script defer src="render.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.css" rel="stylesheet">
+    <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
     <link rel="stylesheet" href="index.css">
-  </head>
+    
+    <!-- Then scripts in dependency order -->
+    <script src="https://kit.fontawesome.com/abc159cb0a.js"></script>
+    <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
+    
+    <!-- Your script last -->
+    <script src="render.js"></script>
+</head>
   <body>
     <!-- Landing Page -->
     <div class="landing" id="landing">
