@@ -5,7 +5,7 @@ const notyf = new Notyf({ duration: 1500, position: { x: 'center', y: 'top' } })
 let peer = null;
 let connections = {};
 let videoFile = null;
-const CHUNK_SIZE = 4096 * 4096; // 1MB chunks
+const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
 
 // UI elements
 const landingPage = document.getElementById("landing");
@@ -371,12 +371,93 @@ async function processAllChunks() {
 // Helper function to handle video chunk data
 function handleVideoChunk(data) {
     const chunk = new Uint8Array(data.data);
-    pendingChunks.push(chunk);
+    
+    // Split large chunks into smaller segments
+    if (chunk.byteLength > MAX_SEGMENT_SIZE) {
+        let offset = 0;
+        while (offset < chunk.byteLength) {
+            const size = Math.min(MAX_SEGMENT_SIZE, chunk.byteLength - offset);
+            const segment = new Uint8Array(chunk.buffer, offset, size);
+            pendingChunks.push(segment);
+            offset += size;
+        }
+    } else {
+        pendingChunks.push(chunk);
+    }
+    
     receivedSize += chunk.byteLength;
+    console.log(`Segmented chunk into ${pendingChunks.length} pieces`);
 
-    // Process chunks in smaller segments
-    if (pendingChunks.length >= 5 && !sourceBuffer.updating) {
-        processChunkBatch();
+    if (!sourceBuffer.updating) {
+        processNextSegment();
+    }
+}
+
+// Process segments sequentially
+async function processNextSegment() {
+    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0) {
+        return;
+    }
+
+    try {
+        const segment = pendingChunks[0];
+        sourceBuffer.appendBuffer(segment);
+
+        // Wait for segment to be processed
+        await new Promise((resolve, reject) => {
+            const handleUpdate = () => {
+                sourceBuffer.removeEventListener('updateend', handleUpdate);
+                sourceBuffer.removeEventListener('error', handleError);
+                resolve();
+            };
+
+            const handleError = (error) => {
+                sourceBuffer.removeEventListener('updateend', handleUpdate);
+                sourceBuffer.removeEventListener('error', handleError);
+                reject(error);
+            };
+
+            sourceBuffer.addEventListener('updateend', handleUpdate);
+            sourceBuffer.addEventListener('error', handleError);
+        });
+
+        // Remove processed segment
+        pendingChunks.shift();
+
+        // Log buffer status
+        if (sourceBuffer.buffered.length > 0) {
+            const start = sourceBuffer.buffered.start(0);
+            const end = sourceBuffer.buffered.end(0);
+            console.log(`Buffer range: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
+        }
+
+        // Process next segment if available
+        if (pendingChunks.length > 0) {
+            setTimeout(() => processNextSegment(), 0);
+        }
+
+    } catch (error) {
+        if (error.name === 'QuotaExceededError') {
+            // Remove old buffer data
+            if (sourceBuffer.buffered.length > 0) {
+                const currentTime = player.currentTime();
+                const start = sourceBuffer.buffered.start(0);
+                const removeEnd = Math.max(start, currentTime - 10);
+
+                try {
+                    await new Promise(resolve => {
+                        sourceBuffer.remove(start, removeEnd);
+                        sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                    });
+                    // Retry current segment
+                    processNextSegment();
+                } catch (e) {
+                    console.error('Error removing old buffer:', e);
+                }
+            }
+        } else {
+            console.error('Error processing segment:', error);
+        }
     }
 }
 async function processChunkBatch() {
@@ -422,28 +503,39 @@ async function processChunkBatch() {
 }
 
 function setupSourceBuffer(mimeType) {
-    if (!mediaSource || mediaSource.readyState !== 'open') return;
+    if (!mediaSource || mediaSource.readyState !== 'open') {
+        return;
+    }
 
     try {
+        // Adjust mime type for WebM if needed
         if (mimeType === 'video/webm') {
             mimeType = 'video/webm;codecs="vp8,vorbis"';
         }
         
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        sourceBuffer.mode = 'segments';
+        sourceBuffer.mode = 'sequence'; // Use sequence mode for better timestamp handling
         
-        // Set a reasonable buffer size (about 30 seconds)
-        const targetBufferSize = 30 * 1024 * 1024; // 30MB
-        if ('setTargetBufferSize' in sourceBuffer) {
-            sourceBuffer.setTargetBufferSize(targetBufferSize);
-        }
-
-        // Handle updateend event
+        // Handle source buffer updates
         sourceBuffer.addEventListener('updateend', () => {
+            // Check if we need to process more segments
             if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                processChunkBatch();
+                processNextSegment();
             }
         });
+
+        // Monitor buffered ranges
+        setInterval(() => {
+            if (sourceBuffer.buffered.length > 0) {
+                const currentTime = player.currentTime();
+                const bufferedEnd = sourceBuffer.buffered.end(0);
+                
+                // If buffer is getting low, try to process more segments
+                if (bufferedEnd - currentTime < 5 && pendingChunks.length > 0) {
+                    processNextSegment();
+                }
+            }
+        }, 1000);
 
         mediaState.isReady = true;
     } catch (e) {
@@ -452,36 +544,20 @@ function setupSourceBuffer(mimeType) {
     }
 }
 // Helper function to handle video complete event
-function handleVideoComplete(metadataInitialized, mediaSourceReady) {
-    console.log('Video transfer complete. Checking state:', {
-        metadataInitialized,
-        mediaSourceReady,
-        pendingChunks: pendingChunks.length,
-        receivedSize,
-        expectedSize
-    });
-
-    if (metadataInitialized && mediaSourceReady) {
-        // Process any remaining chunks
-        processNextChunk();
-        
-        // Set up a check for completion
-        const checkComplete = setInterval(() => {
-            if (pendingChunks.length === 0 && !sourceBuffer.updating) {
-                clearInterval(checkComplete);
-                console.log('All chunks processed, ending stream');
-                
-                try {
-                    if (mediaSource && mediaSource.readyState === 'open') {
-                        mediaSource.endOfStream();
-                        notyf.success("Video fully loaded");
-                    }
-                } catch (e) {
-                    console.error('Error ending stream:', e);
-                }
+function handleVideoComplete() {
+    console.log('Video transfer complete');
+    
+    // Only end the stream if we've processed all segments and the buffer is stable
+    const checkComplete = setInterval(() => {
+        if (pendingChunks.length === 0 && !sourceBuffer.updating) {
+            clearInterval(checkComplete);
+            if (mediaSource && mediaSource.readyState === 'open') {
+                setTimeout(() => {
+                    mediaSource.endOfStream();
+                }, 1000);
             }
-        }, 100);
-    }
+        }
+    }, 500);
 }
 
 function initializePlayerEvents() {
