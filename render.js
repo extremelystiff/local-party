@@ -430,47 +430,7 @@ function handleVideoChunk(data) {
         console.error('Error handling video chunk:', error);
         notyf.error("Error processing video chunk: " + error.message);
     }
-        
-        const percentage = Math.round((receivedSize / data.total) * 100);
-        console.log(`Received chunk: ${receivedSize}/${data.total} bytes (${percentage}%)`);
-
-        // Add to pending queue
-        pendingChunks.push(chunk);
-
-        // Try to process if source buffer is ready
-        if (sourceBuffer && !sourceBuffer.updating) {
-            processNextChunk();
-        }
-
-        // If this was the last chunk
-        if (receivedSize >= data.total) {
-            console.log('All chunks received, finishing stream');
-            
-            // Wait for all chunks to be processed
-            const checkComplete = setInterval(() => {
-                if (pendingChunks.length === 0 && !sourceBuffer.updating) {
-                    clearInterval(checkComplete);
-                    console.log('All chunks processed, ending stream');
-                    
-                    try {
-                        mediaSource.endOfStream();
-                        notyf.success("Video fully loaded");
-                        
-                        // Ensure video is playing if it should be
-                        if (!player.paused()) {
-                            player.play().catch(e => console.error('Play after complete failed:', e));
-                        }
-                    } catch (e) {
-                        console.error('Error ending stream:', e);
-                    }
-                }
-            }, 100);
-        
-    } catch (error) {
-        console.error('Error handling video chunk:', error);
-        notyf.error("Error processing video chunk: " + error.message);
-    }
-}};
+}
 
 // Handle video controls
 function handleVideoControl(data) {
