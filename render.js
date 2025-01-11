@@ -85,11 +85,8 @@ function setupConnection(conn) {
         notyf.error("Connection error occurred");
     });
 
-            append({
-                name: data.username,
-                content: data.message,
-                pfp: data.pfp
-            });
+
+    
     conn.on('open', () => {
         console.log('Connection opened to:', conn.peer);
         if (localStorage.getItem("isHost") !== "true") {
@@ -308,14 +305,17 @@ document.addEventListener("click", function(e) {
             return;
         }
         
-        console.log('Creating room with video:', videoFile.name);
+        // Set host status before initializing peer
         localStorage.setItem("isHost", "true");
         localStorage.setItem("username", username);
         localStorage.setItem("roomName", roomName);
         
+        console.log('Creating room as host with video:', videoFile.name);
+        
         initializePeer(true);
         
         document.getElementById("roomNameText").innerHTML = roomName;
+        document.getElementById("createRoomText").innerHTML = "";
         createPage.style.display = "none";
         document.title = `Local Party | ${roomName}`;
         roomPage.style.display = "block";
