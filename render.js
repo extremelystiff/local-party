@@ -28,11 +28,12 @@ function initializeApp() {
     console.log('Initializing app...');
     
     try {
-        // Initialize video.js player
+        // Initialize video.js player with autoplay disabled
         player = videojs('video-player', {
             controls: true,
             preload: 'auto',
             fluid: true,
+            playsinline: true,
             html5: {
                 vhs: {
                     overrideNative: true
@@ -199,54 +200,119 @@ async function startStreamingTo(conn) {
 function handleVideoMetadata(data) {
     console.log('Received video metadata:', data);
     
-    // Reset state
-    pendingChunks = [];
-    mediaSource = new MediaSource();
-    
-    // Set up MediaSource
-    mediaSource.addEventListener('sourceopen', () => {
-        try {
-            // Use a more generic MIME type for better compatibility
-            const mimeType = 'video/webm; codecs="vp8,vorbis"';
-            sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-            sourceBuffer.mode = 'segments';
-            sourceBuffer.addEventListener('updateend', processNextChunk);
-            notyf.success("Starting to receive video");
-        } catch (e) {
-            console.error('Error setting up source buffer:', e);
-            notyf.error("Error setting up video stream");
-        }
-    });
-
-    // Set player source
-    const url = URL.createObjectURL(mediaSource);
-    player.src({ src: url, type: 'video/webm' });
+    try {
+        // Reset state
+        pendingChunks = [];
+        receivedSize = 0;
+        
+        // Create new MediaSource
+        mediaSource = new MediaSource();
+        const url = URL.createObjectURL(mediaSource);
+        
+        mediaSource.addEventListener('sourceopen', () => {
+            try {
+                console.log('MediaSource opened, setting up source buffer');
+                
+                // Detect MIME type from the video file
+                const mimeType = data.type || 'video/webm;codecs="vp8,opus"';
+                console.log('Using MIME type:', mimeType);
+                
+                // Create source buffer
+                sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+                sourceBuffer.mode = 'sequence';  // Changed to sequence mode
+                
+                // Add event listeners
+                sourceBuffer.addEventListener('updateend', () => {
+                    console.log('Source buffer updated, checking queue');
+                    processNextChunk();
+                });
+                
+                sourceBuffer.addEventListener('error', (e) => {
+                    console.error('Source buffer error:', e);
+                });
+                
+                notyf.success("Starting to receive video");
+            } catch (e) {
+                console.error('Error in sourceopen:', e);
+                notyf.error("Error setting up video stream: " + e.message);
+            }
+        });
+        
+        // Set up player
+        console.log('Setting player source to:', url);
+        player.src({
+            src: url,
+            type: data.type || 'video/webm'
+        });
+        
+        // Reset player state
+        player.currentTime(0);
+        player.pause();
+        
+    } catch (e) {
+        console.error('Error in handleVideoMetadata:', e);
+        notyf.error("Error setting up video stream: " + e.message);
+    }
 }
 
 // Process next chunk in queue
 function processNextChunk() {
-    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0) {
+    if (!sourceBuffer || !mediaSource || sourceBuffer.updating || pendingChunks.length === 0) {
         return;
     }
 
     try {
         const chunk = pendingChunks.shift();
+        console.log(`Processing chunk of size ${chunk.byteLength}`);
+        
+        // Append the chunk to source buffer
         sourceBuffer.appendBuffer(chunk);
-
-        // Start playback when we have enough data
-        if (!player.played().length && 
-            sourceBuffer.buffered.length > 0 && 
-            sourceBuffer.buffered.end(0) - sourceBuffer.buffered.start(0) >= 2) {
-            console.log('Buffer ready, starting playback');
-            player.play()
-                .then(() => console.log('Playback started'))
-                .catch(err => console.error('Playback failed:', err));
+        
+        // Check buffer status
+        if (sourceBuffer.buffered.length > 0) {
+            const bufferedEnd = sourceBuffer.buffered.end(0);
+            const bufferedStart = sourceBuffer.buffered.start(0);
+            const bufferedDuration = bufferedEnd - bufferedStart;
+            console.log(`Buffer status: ${bufferedDuration.toFixed(2)}s buffered`);
+            
+            // If we have enough buffer and video hasn't started playing
+            if (bufferedDuration >= 1 && player.paused() && !player.played().length) {
+                console.log('Sufficient buffer accumulated, attempting playback');
+                player.play()
+                    .then(() => {
+                        console.log('Playback started successfully');
+                        notyf.success("Video playback started");
+                    })
+                    .catch(err => {
+                        console.error('Playback failed:', err);
+                        // If play fails, try again in a second
+                        setTimeout(() => {
+                            if (player.paused()) {
+                                player.play().catch(e => console.error('Retry playback failed:', e));
+                            }
+                        }, 1000);
+                    });
+            }
         }
     } catch (e) {
-        console.error('Error appending buffer:', e);
-        if (pendingChunks.length) {
-            setTimeout(processNextChunk, 100);
+        console.error('Error in processNextChunk:', e);
+        
+        // If we get a QuotaExceededError, clear some buffer
+        if (e.name === 'QuotaExceededError') {
+            if (sourceBuffer.buffered.length > 0) {
+                const start = sourceBuffer.buffered.start(0);
+                const end = sourceBuffer.buffered.start(0) + 10; // Remove 10 seconds
+                sourceBuffer.remove(start, end);
+            }
         }
+        
+        // Requeue the chunk if possible
+        if (pendingChunks.length < 100) { // Prevent infinite queue
+            pendingChunks.unshift(chunk);
+        }
+        
+        // Try again after a delay
+        setTimeout(processNextChunk, 100);
     }
 }
 
@@ -254,27 +320,46 @@ function processNextChunk() {
 function handleVideoChunk(data) {
     try {
         const chunk = new Uint8Array(data.data);
-        console.log(`Received chunk: ${data.offset}/${data.total} bytes (${Math.round((data.offset / data.total) * 100)}%)`);
+        receivedSize += chunk.byteLength;
+        
+        const percentage = Math.round((receivedSize / data.total) * 100);
+        console.log(`Received chunk: ${receivedSize}/${data.total} bytes (${percentage}%)`);
 
+        // Add to pending queue
         pendingChunks.push(chunk);
 
+        // Try to process if source buffer is ready
         if (sourceBuffer && !sourceBuffer.updating) {
             processNextChunk();
         }
 
-        // Check if this was the last chunk
-        if (data.offset + chunk.byteLength >= data.total) {
+        // If this was the last chunk
+        if (receivedSize >= data.total) {
+            console.log('All chunks received, finishing stream');
+            
+            // Wait for all chunks to be processed
             const checkComplete = setInterval(() => {
                 if (pendingChunks.length === 0 && !sourceBuffer.updating) {
                     clearInterval(checkComplete);
-                    mediaSource.endOfStream();
-                    notyf.success("Video ready to play");
+                    console.log('All chunks processed, ending stream');
+                    
+                    try {
+                        mediaSource.endOfStream();
+                        notyf.success("Video fully loaded");
+                        
+                        // Ensure video is playing if it should be
+                        if (!player.paused()) {
+                            player.play().catch(e => console.error('Play after complete failed:', e));
+                        }
+                    } catch (e) {
+                        console.error('Error ending stream:', e);
+                    }
                 }
             }, 100);
         }
     } catch (error) {
         console.error('Error handling video chunk:', error);
-        notyf.error("Error processing video chunk");
+        notyf.error("Error processing video chunk: " + error.message);
     }
 }
 
