@@ -183,8 +183,6 @@ function handleVideoMetadata(data) {
 
 function handleVideoChunk(data) {
     try {
-        if (!isReceivingVideo) return;
-        
         // Store the raw ArrayBuffer data
         receivedChunks.push(data.data);
         receivedSize += data.data.byteLength;
@@ -212,35 +210,28 @@ function handleVideoChunk(data) {
                 expectedSize: expectedSize
             });
             
-            // Clean up old video source if it exists
-            if (videoPlayer.src) {
-                URL.revokeObjectURL(videoPlayer.src);
-            }
-            
-            // Create object URL and set up video player
+            // Create object URL
             const url = URL.createObjectURL(blob);
-            videoPlayer.src = url;
             
-            // Reset video player state
-            videoPlayer.currentTime = 0;
-            videoPlayer.style.display = 'block';
+            // Update Video.js source
+            player.src({
+                src: url,
+                type: videoType
+            });
             
-            // Wait for video to be loaded before enabling play
-            videoPlayer.addEventListener('loadedmetadata', () => {
-                console.log('Video metadata loaded:', {
-                    duration: videoPlayer.duration,
-                    videoWidth: videoPlayer.videoWidth,
-                    videoHeight: videoPlayer.videoHeight
-                });
-                isReceivingVideo = false;
+            player.ready(() => {
+                player.load();
+                console.log('Video.js player loaded new source');
                 notyf.success("Video ready to play");
-            }, { once: true });
-            
-            videoPlayer.addEventListener('error', (e) => {
-                console.error('Video error:', videoPlayer.error);
-                notyf.error("Error loading video: " + (videoPlayer.error?.message || 'Unknown error'));
-                isReceivingVideo = false;
-            }, { once: true });
+                
+                player.one('loadedmetadata', () => {
+                    console.log('Video metadata loaded:', {
+                        duration: player.duration(),
+                        videoWidth: player.videoWidth(),
+                        videoHeight: player.videoHeight()
+                    });
+                });
+            });
             
             receivedChunks = [];
             receivedSize = 0;
@@ -248,7 +239,6 @@ function handleVideoChunk(data) {
     } catch (error) {
         console.error('Error handling video chunk:', error);
         notyf.error("Error processing video chunk: " + error.message);
-        isReceivingVideo = false;
     }
 }
 
@@ -321,9 +311,15 @@ function onChangeFile() {
     if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
     
     const file = fileInput.files[0];
-    videoFile = file;  // Set videoFile regardless of host status during file selection
-    const path = (window.URL || window.webkitURL).createObjectURL(file);
-    videoPlayer.src = path;
+    videoFile = file;
+    const url = URL.createObjectURL(file);
+    
+    // Update Video.js source
+    player.src({
+        src: url,
+        type: file.type
+    });
+    
     console.log('Video file loaded:', {
         name: file.name,
         size: file.size,
@@ -332,16 +328,13 @@ function onChangeFile() {
 }
 
 // Video Control Handler
-let allowEmit = true;
-
 function videoControlsHandler(e) {
     if (!allowEmit) return;
     
     const controlData = {
         type: 'control',
         action: e.type,
-        time: videoPlayer.currentTime,
-        username: localStorage.getItem("username")
+        time: player.currentTime()
     };
     
     Object.values(connections).forEach(conn => {
@@ -350,7 +343,7 @@ function videoControlsHandler(e) {
         }
     });
     
-    const content = time(e.type === 'play' ? "played" : "paused", "You", videoPlayer.currentTime);
+    const content = time(e.type === 'play' ? "played" : "paused", "You", player.currentTime());
     append({
         name: "Local Party",
         content: content,
@@ -361,8 +354,9 @@ function videoControlsHandler(e) {
     setTimeout(() => { allowEmit = true; }, 500);
 }
 
-videoPlayer.addEventListener('play', videoControlsHandler);
-videoPlayer.addEventListener('pause', videoControlsHandler);
+// Use Video.js events instead of native video events
+player.on('play', videoControlsHandler);
+player.on('pause', videoControlsHandler);
 
 // Event Listeners
 document.addEventListener("click", function(e) {
@@ -517,5 +511,27 @@ document.getElementById('roomCodeText').addEventListener('click', () => {
     });
 });
 
-// Show landing page on load
-landingPage.style.display = "block";
+// Video.js player instance
+let player;
+
+// Initialize Video.js player
+document.addEventListener('DOMContentLoaded', () => {
+    player = videojs('video-player', {
+        controls: true,
+        preload: 'auto',
+        fluid: true,
+        html5: {
+            vhs: {
+                overrideNative: true
+            },
+            nativeVideoTracks: false,
+            nativeAudioTracks: false,
+            nativeTextTracks: false
+        }
+    });
+    
+    // Add error handling
+    player.on('error', function() {
+        console.error('Video.js error:', player.error());
+    });
+});
