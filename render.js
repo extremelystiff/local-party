@@ -466,53 +466,68 @@ async function processChunkBatch() {
         return;
     }
 
+    console.log(`Starting to process ${pendingChunks.length} total chunks`);
+    let processedChunks = 0;
+
     try {
-        // Process all chunks in sequence to avoid gaps
-        while (pendingChunks.length > 0 && !sourceBuffer.updating) {
-            const chunk = pendingChunks.shift();
-            console.log(`Processing chunk of size ${chunk.byteLength}`);
+        while (pendingChunks.length > 0) {
+            const chunk = pendingChunks[0]; // Don't shift yet
+            console.log(`Processing chunk ${processedChunks + 1}/${pendingChunks.length} of size ${chunk.byteLength}`);
             
-            // Log buffer ranges before append
+            // Log current ranges before append
             if (sourceBuffer.buffered.length > 0) {
                 for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                    console.log(`Before append - Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                    console.log(`Before chunk ${processedChunks + 1} - Buffer range ${i}: ` +
+                              `${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
                 }
             }
 
-            sourceBuffer.appendBuffer(chunk);
+            try {
+                sourceBuffer.appendBuffer(chunk);
+                // Wait for this chunk to be processed
+                await new Promise((resolve, reject) => {
+                    sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                    sourceBuffer.addEventListener('error', reject, { once: true });
+                });
 
-            // Wait for chunk to be processed
-            await new Promise((resolve, reject) => {
-                sourceBuffer.addEventListener('updateend', () => {
-                    // Log buffer ranges after append
-                    if (sourceBuffer.buffered.length > 0) {
-                        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                            console.log(`After append - Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
-                        }
+                // Only remove the chunk from pending after successful append
+                pendingChunks.shift();
+                processedChunks++;
+
+                // Log ranges after append
+                if (sourceBuffer.buffered.length > 0) {
+                    for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                        console.log(`After chunk ${processedChunks} - Buffer range ${i}: ` +
+                                  `${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
                     }
-                    resolve();
-                }, { once: true });
-                
-                sourceBuffer.addEventListener('error', reject, { once: true });
-            });
+                }
+
+            } catch (e) {
+                if (e.name === 'QuotaExceededError') {
+                    console.log('Quota exceeded, cleaning up old data');
+                    if (sourceBuffer.buffered.length > 0) {
+                        const currentTime = player.currentTime();
+                        const start = sourceBuffer.buffered.start(0);
+                        const removeEnd = Math.max(start, currentTime - 10);
+                        
+                        await new Promise(resolve => {
+                            sourceBuffer.remove(start, removeEnd);
+                            sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                        });
+                        // Don't shift the chunk - we'll try again
+                        continue;
+                    }
+                } else {
+                    throw e; // Re-throw other errors
+                }
+            }
         }
 
-        console.log('All chunks processed');
+        console.log(`Successfully processed all ${processedChunks} chunks`);
 
     } catch (e) {
         console.error('Error in processChunkBatch:', e);
-        if (e.name === 'QuotaExceededError') {
-            console.log('Quota exceeded, cleaning up old data');
-            if (sourceBuffer.buffered.length > 0) {
-                const currentTime = player.currentTime();
-                const start = sourceBuffer.buffered.start(0);
-                const removeEnd = Math.max(start, currentTime - 10);
-                
-                sourceBuffer.remove(start, removeEnd);
-                // Put chunk back at the start of pending
-                pendingChunks.unshift(chunk);
-            }
-        }
+        console.log(`Processed ${processedChunks} chunks before error`);
     }
 }
 function setupSourceBuffer(mimeType) {
@@ -521,26 +536,26 @@ function setupSourceBuffer(mimeType) {
     }
 
     try {
-        // Adjust mime type for WebM if needed
         if (mimeType === 'video/webm') {
             mimeType = 'video/webm;codecs="vp8,vorbis"';
         }
         
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        sourceBuffer.mode = 'sequence'; // Change to sequence mode for continuous appending
-        console.log('Source buffer created in sequence mode');
+        sourceBuffer.mode = 'sequence';  // For continuous timestamps
+        console.log('Created source buffer in sequence mode');
         
-        // Handle source buffer updates
         sourceBuffer.addEventListener('updateend', () => {
-            // Log current buffer ranges
+            // Log all current ranges
             if (sourceBuffer.buffered.length > 0) {
+                console.log('Current buffer ranges after update:');
                 for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                    console.log(`Current buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                    console.log(`Range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
                 }
             }
             
-            // Check if we need to process more segments
+            // Continue processing if we have more chunks
             if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                console.log(`Still have ${pendingChunks.length} chunks to process`);
                 processChunkBatch();
             }
         });
