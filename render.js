@@ -90,7 +90,7 @@ function setupConnection(conn) {
                 content: data.message,
                 pfp: data.pfp
             });
-        
+        }
     });
     
     conn.on('open', () => {
