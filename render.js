@@ -140,22 +140,42 @@ async function setupConnection(conn) {
                     console.log('Processing metadata:', data);
                     expectedSize = data.size;
                     
+                    // Reset state before initializing
+                    mediaState.isReady = false;
+                    mediaState.hasError = false;
+                    mediaState.isInitializing = false;
+                    pendingChunks = [];
+                    receivedSize = 0;
+                    
                     const success = await initializeMediaSource(videoElement, data.mimeType);
                     if (!success) {
-                        throw new Error('Failed to initialize media source');
+                        throw new Error('Media source initialization failed');
                     }
+                    mediaState.isReady = true;
+                    console.log('Media source initialized successfully');
                     break;
 
                 case 'video-chunk':
-                    if (!mediaState.hasError) {
+                    // Only accept chunks if initialization was successful
+                    if (!mediaState.hasError && mediaState.isReady && sourceBuffer) {
                         handleVideoChunk(data);
                     }
                     break;
 
                 case 'video-complete':
                     console.log('Video transfer complete');
-                    if (mediaState.isReady && !sourceBuffer.updating) {
-                        processNextChunk();
+                    if (mediaState.isReady && sourceBuffer && !sourceBuffer.updating) {
+                        handleVideoComplete(true, true);
+                    }
+                    break;
+
+                case 'video-metadata':
+                    console.log('Processing metadata:', data);
+                    expectedSize = data.size;
+                    
+                    const success = await retryInitialization(videoElement, data.mimeType);
+                    if (!success) {
+                        throw new Error('Media source initialization failed after retries');
                     }
                     break;
 
@@ -167,11 +187,7 @@ async function setupConnection(conn) {
                     break;
 
                 case 'chat':
-                    append({
-                        name: data.username,
-                        content: data.message,
-                        pfp: data.pfp || '#f3dfbf'
-                    });
+                    handleChatMessage(data);
                     break;
 
                 case 'control':
@@ -663,17 +679,108 @@ async function initializeMediaSource(videoElement, mimeType) {
     }
 
     mediaState.isInitializing = true;
+    console.log('Starting media source initialization');
 
     try {
-        const success = await setupMediaSource(videoElement, mimeType);
+        // Clean up existing media source
+        if (mediaSource) {
+            try {
+                if (mediaSource.readyState === 'open') {
+                    mediaSource.endOfStream();
+                }
+            } catch (e) {
+                console.warn('Error cleaning up old MediaSource:', e);
+            }
+            if (mediaState.mediaSourceUrl) {
+                URL.revokeObjectURL(mediaState.mediaSourceUrl);
+            }
+        }
+
+        // Reset state
+        sourceBuffer = null;
+        mediaSource = new MediaSource();
+        mediaState.mediaSourceUrl = URL.createObjectURL(mediaSource);
+
+        await new Promise((resolve, reject) => {
+            const sourceOpenHandler = () => {
+                try {
+                    console.log('MediaSource opened');
+                    
+                    // Set up source buffer
+                    const finalMimeType = mimeType === 'video/webm' ? 
+                        'video/webm;codecs="vp8,vorbis"' : mimeType;
+                    
+                    sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
+                    sourceBuffer.mode = 'segments';
+                    console.log('SourceBuffer created successfully');
+
+                    // Set up source buffer event listeners
+                    sourceBuffer.addEventListener('updateend', () => {
+                        if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                            processNextChunk();
+                        }
+                    });
+
+                    // Update player source
+                    if (player) {
+                        player.src({
+                            src: mediaState.mediaSourceUrl,
+                            type: finalMimeType
+                        });
+                    }
+
+                    resolve();
+                } catch (error) {
+                    reject(error);
+                }
+            };
+
+            mediaSource.addEventListener('sourceopen', sourceOpenHandler, { once: true });
+            videoElement.src = mediaState.mediaSourceUrl;
+        });
+
         mediaState.isInitializing = false;
-        return success;
+        mediaState.isReady = true;
+        console.log('Media source initialization complete');
+        return true;
+
     } catch (error) {
-        console.error('Failed to initialize media source:', error);
+        console.error('Media source initialization failed:', error);
         mediaState.hasError = true;
         mediaState.isInitializing = false;
-        return false;
+        mediaState.isReady = false;
+        throw error;
     }
+}
+
+async function retryInitialization(videoElement, mimeType, maxRetries = 3) {
+    let attempts = 0;
+    
+    while (attempts < maxRetries) {
+        try {
+            console.log(`Attempt ${attempts + 1} of ${maxRetries} to initialize media source`);
+            
+            // Reset state
+            mediaState.isReady = false;
+            mediaState.hasError = false;
+            mediaState.isInitializing = false;
+            pendingChunks = [];
+            receivedSize = 0;
+            
+            const success = await initializeMediaSource(videoElement, mimeType);
+            if (success) {
+                console.log('Media source initialization succeeded');
+                return true;
+            }
+        } catch (error) {
+            console.error(`Attempt ${attempts + 1} failed:`, error);
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait before retry
+        }
+        attempts++;
+    }
+    
+    console.error('All initialization attempts failed');
+    return false;
 }
 // Helper function to handle quota exceeded error
 async function handleQuotaExceeded() {
