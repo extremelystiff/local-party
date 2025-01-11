@@ -40,9 +40,11 @@ function initializeApp() {
                 preload: 'auto',
                 fluid: true,
                 playsinline: true,
+                autoplay: false,
                 html5: {
                     vhs: {
-                        overrideNative: true
+                        overrideNative: true,
+                        enableLowInitialPlaylist: true,
                     },
                     nativeVideoTracks: false,
                     nativeAudioTracks: false,
@@ -51,29 +53,12 @@ function initializeApp() {
             });
             
             console.log('Video.js initialized');
-            initializePlayerEvents(); 
-            console.log('Player Events initialized');
-            setupBufferMonitoring(); 
-            console.log('Buffer monitoring initialized');
-            // Set up video player event handlers
-            player.on('error', function(error) {
-                console.error('Video.js error:', player.error());
-                if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
-                    processNextChunk();
-                }
-            });
-
-            player.on('waiting', function() {
-                console.log('Video waiting for data');
-                if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
-                    processNextChunk();
-                }
-            });
-
-            // Add play/pause event listeners
-            player.on('play', videoControlsHandler);
-            player.on('pause', videoControlsHandler);
-
+            
+            // Initialize player events
+            initializePlayerEvents();
+            
+            // Set up buffer monitoring
+            setupBufferMonitoring();
         }
 
         // Show landing page
@@ -303,18 +288,26 @@ function handleVideoComplete(metadataInitialized, mediaSourceReady) {
 function initializePlayerEvents() {
     if (!player) return;
 
+    // Remove any existing event listeners
+    player.off('error');
+    player.off('waiting');
+    player.off('canplay');
+    player.off('playing');
+    player.off('timeupdate');
+
     // Handle video errors
     player.on('error', function(error) {
         console.error('Video.js error:', player.error());
-        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
-            processNextChunk();
+        // Attempt to recover if possible
+        if (mediaSource && sourceBuffer && !sourceBuffer.updating && pendingChunks.length > 0) {
+            setTimeout(processNextChunk, 1000);
         }
     });
 
     // Handle waiting events
     player.on('waiting', function() {
         console.log('Video waiting for data');
-        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+        if (mediaSource && sourceBuffer && !sourceBuffer.updating && pendingChunks.length > 0) {
             processNextChunk();
         }
     });
@@ -336,9 +329,6 @@ function initializePlayerEvents() {
             const bufferedEnd = sourceBuffer.buffered.end(0);
             const bufferAhead = bufferedEnd - currentTime;
             
-            console.log(`Playback position: ${currentTime.toFixed(2)}, Buffer ahead: ${bufferAhead.toFixed(2)}s`);
-            
-            // If buffer is running low, process more chunks
             if (bufferAhead < 3 && pendingChunks.length > 0) {
                 processNextChunk();
             }
@@ -413,9 +403,10 @@ async function setupMediaSource(videoElement, mimeType) {
 
             // Create new MediaSource
             mediaSource = new MediaSource();
-            console.log('Created new MediaSource');
+            const mediaUrl = URL.createObjectURL(mediaSource);
+            console.log('Created new MediaSource URL:', mediaUrl);
 
-            const handleSourceOpen = async () => {
+            const handleSourceOpen = () => {
                 try {
                     console.log('MediaSource opened, state:', mediaSource.readyState);
                     mediaSource.removeEventListener('sourceopen', handleSourceOpen);
@@ -450,12 +441,22 @@ async function setupMediaSource(videoElement, mimeType) {
                     pendingChunks = pendingChunks || [];
                     receivedSize = 0;
 
-                    // Set up the video player
+                    // Update the video source using videojs
                     if (player) {
-                        player.src({
-                            src: URL.createObjectURL(mediaSource),
-                            type: finalMimeType
-                        });
+                        try {
+                            videoElement.src = mediaUrl;
+                            // Set the source on the player
+                            player.src({
+                                src: mediaUrl,
+                                type: finalMimeType
+                            });
+                            player.load(); // Important: explicitly load the new source
+                            console.log('Video player source updated');
+                        } catch (e) {
+                            console.error('Error setting player source:', e);
+                            reject(e);
+                            return;
+                        }
                     }
 
                     resolve();
@@ -466,8 +467,13 @@ async function setupMediaSource(videoElement, mimeType) {
             };
 
             mediaSource.addEventListener('sourceopen', handleSourceOpen);
-            videoElement.src = URL.createObjectURL(mediaSource);
-            console.log('Set video element source');
+            mediaSource.addEventListener('error', (e) => {
+                console.error('MediaSource error:', e);
+                reject(e);
+            });
+
+            // Set initial source on video element
+            videoElement.src = mediaUrl;
 
         } catch (e) {
             console.error('Error setting up MediaSource:', e);
@@ -475,7 +481,6 @@ async function setupMediaSource(videoElement, mimeType) {
         }
     });
 }
-
 // Helper function to get proper MIME type and codecs
 function getVideoMimeType(file) {
     // Start with the file's type
