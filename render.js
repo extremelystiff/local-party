@@ -116,32 +116,53 @@ function initializePeer(asHost) {
 // Set up peer connection
 function setupConnection(conn) {
     connections[conn.peer] = conn;
+    let metadataInitialized = false;
     
-    conn.on('data', (data) => {
+    conn.on('data', async (data) => {
         console.log('Received data type:', data.type);
         
-        switch (data.type) {
-            case 'video-chunk':
-                handleVideoChunk(data);
-                break;
-            case 'video-metadata':
-                handleVideoMetadata(data);
-                break;
-            case 'video-request':
-                if (isHost && videoFile) {
-                    startStreamingTo(conn);
-                }
-                break;
-            case 'chat':
-                append({
-                    name: data.username,
-                    content: data.message,
-                    pfp: data.pfp
-                });
-                break;
-            case 'control':
-                handleVideoControl(data);
-                break;
+        try {
+            switch (data.type) {
+                case 'video-metadata':
+                    await handleVideoMetadata(data);
+                    metadataInitialized = true;
+                    // Process any queued chunks after metadata is initialized
+                    if (pendingChunks.length > 0) {
+                        console.log(`Processing ${pendingChunks.length} queued chunks`);
+                        processNextChunk();
+                    }
+                    break;
+                    
+                case 'video-chunk':
+                    if (!metadataInitialized) {
+                        console.log('Queuing chunk while waiting for metadata initialization');
+                        pendingChunks.push(new Uint8Array(data.data));
+                    } else {
+                        handleVideoChunk(data);
+                    }
+                    break;
+                    
+                case 'video-request':
+                    if (isHost && videoFile) {
+                        startStreamingTo(conn);
+                    }
+                    break;
+                    
+                case 'chat':
+                    append({
+                        name: data.username,
+                        content: data.message,
+                        pfp: data.pfp
+                    });
+                    break;
+                    
+                case 'control':
+                    handleVideoControl(data);
+                    break;
+            }
+        } catch (error) {
+            console.error('Error processing received data:', error);
+            notyf.error("Error processing video data: " + error.message);
         }
     });
     
@@ -160,6 +181,7 @@ function setupConnection(conn) {
         });
     });
 }
+
 
 // Start streaming video to peer
 async function startStreamingTo(conn) {
@@ -205,61 +227,56 @@ async function startStreamingTo(conn) {
 function handleVideoMetadata(data) {
     console.log('Received video metadata:', data);
     
-    try {
-        // Reset state
-        pendingChunks = [];
-        receivedSize = 0;
-        expectedSize = data.size;
-        videoType = data.type || 'video/webm;codecs="vp8,opus"';
-        
-        console.log(`Initializing stream: size=${expectedSize}, type=${videoType}`);
-        
-        // Create new MediaSource
-        mediaSource = new MediaSource();
-        const url = URL.createObjectURL(mediaSource);
-        
-        mediaSource.addEventListener('sourceopen', () => {
-            try {
-                console.log('MediaSource opened, setting up source buffer');
-                sourceBuffer = mediaSource.addSourceBuffer(videoType);
-                sourceBuffer.mode = 'sequence';
-                
-                sourceBuffer.addEventListener('updateend', () => {
-                    console.log('Source buffer updated, checking queue');
-                    processNextChunk();
-                });
-                
-                sourceBuffer.addEventListener('error', (e) => {
-                    console.error('Source buffer error:', e);
-                });
-                
-                // Process any chunks that arrived before metadata was ready
-                if (pendingChunks.length > 0) {
-                    console.log(`Processing ${pendingChunks.length} queued chunks`);
-                    processNextChunk();
+    return new Promise((resolve, reject) => {
+        try {
+            // Reset state
+            pendingChunks = [];
+            receivedSize = 0;
+            expectedSize = data.size;
+            videoType = data.type || 'video/webm;codecs="vp8,opus"';
+            
+            console.log(`Initializing stream: size=${expectedSize}, type=${videoType}`);
+            
+            // Create new MediaSource
+            mediaSource = new MediaSource();
+            const url = URL.createObjectURL(mediaSource);
+            
+            mediaSource.addEventListener('sourceopen', () => {
+                try {
+                    console.log('MediaSource opened, setting up source buffer');
+                    sourceBuffer = mediaSource.addSourceBuffer(videoType);
+                    sourceBuffer.mode = 'sequence';
+                    
+                    sourceBuffer.addEventListener('updateend', () => {
+                        console.log('Source buffer updated, checking queue');
+                        processNextChunk();
+                    });
+                    
+                    // Set up player source after buffer is ready
+                    console.log('Setting player source to:', url);
+                    player.src({
+                        src: url,
+                        type: videoType
+                    });
+                    
+                    // Reset player state
+                    player.currentTime(0);
+                    player.pause();
+                    
+                    resolve();
+                } catch (e) {
+                    console.error('Error in sourceopen:', e);
+                    reject(e);
                 }
-            } catch (e) {
-                console.error('Error in sourceopen:', e);
-                notyf.error("Error setting up video stream: " + e.message);
-            }
-        });
-        
-        // Set up player
-        console.log('Setting player source to:', url);
-        player.src({
-            src: url,
-            type: videoType
-        });
-        
-        // Reset player state
-        player.currentTime(0);
-        player.pause();
-        
-    } catch (e) {
-        console.error('Error in handleVideoMetadata:', e);
-        notyf.error("Error setting up video stream: " + e.message);
-    }
+            });
+            
+        } catch (e) {
+            console.error('Error in handleVideoMetadata:', e);
+            reject(e);
+        }
+    });
 }
+
 
 // Process next chunk in queue
 function processNextChunk() {
@@ -271,7 +288,6 @@ function processNextChunk() {
         const chunk = pendingChunks.shift();
         console.log(`Processing chunk of size ${chunk.byteLength}`);
         
-        // Append the chunk to source buffer
         sourceBuffer.appendBuffer(chunk);
         
         // Check buffer status
@@ -304,24 +320,19 @@ function processNextChunk() {
         console.error('Error in processNextChunk:', e);
         
         // If we get a QuotaExceededError, clear some buffer
-        if (e.name === 'QuotaExceededError') {
-            if (sourceBuffer.buffered.length > 0) {
-                const start = sourceBuffer.buffered.start(0);
-                const end = sourceBuffer.buffered.start(0) + 10; // Remove 10 seconds
-                sourceBuffer.remove(start, end);
-            }
+        if (e.name === 'QuotaExceededError' && sourceBuffer.buffered.length > 0) {
+            const start = sourceBuffer.buffered.start(0);
+            const end = sourceBuffer.buffered.start(0) + 10; // Remove 10 seconds
+            sourceBuffer.remove(start, end);
         }
         
-        // Requeue the chunk if possible
-        if (pendingChunks.length < 100) { // Prevent infinite queue
-            pendingChunks.unshift(chunk);
-        }
+        // Requeue the chunk
+        pendingChunks.unshift(chunk);
         
         // Try again after a delay
         setTimeout(processNextChunk, 100);
     }
 }
-
 // Handle incoming video chunk
 function handleVideoChunk(data) {
     const chunk = new Uint8Array(data.data);
