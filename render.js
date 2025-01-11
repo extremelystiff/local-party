@@ -407,7 +407,7 @@ function setupConnection(conn) {
                         }
                         break;
                             }
-                        }
+
                         if (!inserted) {
                             pendingChunks.push({
                                 data: chunk,
