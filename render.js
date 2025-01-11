@@ -77,6 +77,8 @@ function setupConnection(conn) {
         console.log('Connection opened to:', conn.peer);
         if (!isHost) {
             console.log('Client requesting video from host');
+            // Clear any existing video source for peer
+            videoPlayer.src = '';
             conn.send({
                 type: 'video-request'
             });
@@ -233,7 +235,7 @@ function appendData(roomName, roomCode) {
 // File Handlers
 function onChangeFile() {
     const file = document.getElementById("file-id").files[0];
-    if (file) {
+    if (file && isHost) {
         videoFile = file;
         const path = (window.URL || window.webkitURL).createObjectURL(file);
         videoPlayer.src = path;
@@ -319,6 +321,11 @@ document.addEventListener("click", function(e) {
     else if (e.target.id === "joinRoomButton") {
         landingPage.style.display = "none";
         joinPage.style.display = "block";
+        // Hide file input for joining peers
+        const fileInput = document.getElementById("file-id");
+        if (fileInput) {
+            fileInput.style.display = "none";
+        }
     }
     
     else if (e.target.id === "roomJoinButton") {
