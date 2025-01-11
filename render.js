@@ -465,36 +465,47 @@ async function processChunkBatch() {
 
     console.log(`Starting to process ${pendingChunks.length} chunks...`);
     
-    // Create a working copy of chunks so we don't lose them
-    let chunksToProcess = [...pendingChunks];
-    let processedCount = 0;
-
     try {
-        for (let i = 0; i < chunksToProcess.length; i++) {
-            const chunk = chunksToProcess[i];
-            console.log(`Processing chunk ${i + 1}/${chunksToProcess.length}, size: ${chunk.byteLength}`);
+        // First, combine chunks into sequential groups
+        let currentGroup = new Uint8Array(0);
+        let groupSize = 0;
+        const maxGroupSize = 1024 * 1024 * 2; // 2MB per group
 
-            if (!sourceBuffer || !mediaSource || mediaSource.readyState !== 'open') {
-                console.error('Source buffer or media source became unavailable');
-                break;
-            }
+        for (let i = 0; i < pendingChunks.length; i++) {
+            const chunk = pendingChunks[i];
+            const newSize = groupSize + chunk.byteLength;
+            
+            // Create a new array with combined size
+            const newGroup = new Uint8Array(newSize);
+            // Copy existing data
+            newGroup.set(currentGroup);
+            // Add new chunk data
+            newGroup.set(new Uint8Array(chunk), groupSize);
+            
+            currentGroup = newGroup;
+            groupSize = newSize;
 
-            try {
-                await new Promise((resolve, reject) => {
-                    if (sourceBuffer.updating) {
-                        console.log('Source buffer still updating, waiting...');
-                        sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                        return;
+            // If we've reached max group size or it's the last chunk, append the group
+            if (groupSize >= maxGroupSize || i === pendingChunks.length - 1) {
+                console.log(`Appending group of size ${groupSize} bytes`);
+                
+                // Log buffer state before append
+                if (sourceBuffer.buffered.length > 0) {
+                    for (let j = 0; j < sourceBuffer.buffered.length; j++) {
+                        console.log(`Before append - Buffer range ${j}: ` +
+                            `${sourceBuffer.buffered.start(j).toFixed(3)}s to ${sourceBuffer.buffered.end(j).toFixed(3)}s`);
                     }
+                }
 
+                await new Promise((resolve, reject) => {
                     const handleUpdateEnd = () => {
                         sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
                         sourceBuffer.removeEventListener('error', handleError);
                         
-                        // Log buffer state
+                        // Log buffer state after append
                         if (sourceBuffer.buffered.length > 0) {
                             for (let j = 0; j < sourceBuffer.buffered.length; j++) {
-                                console.log(`After chunk ${i + 1} - Buffer range ${j}: ` +
+                                console.log(`After append - Buffer range ${j}: ` +
                                     `${sourceBuffer.buffered.start(j).toFixed(3)}s to ${sourceBuffer.buffered.end(j).toFixed(3)}s`);
                             }
                         }
@@ -510,41 +521,23 @@ async function processChunkBatch() {
                     sourceBuffer.addEventListener('updateend', handleUpdateEnd);
                     sourceBuffer.addEventListener('error', handleError);
 
-                    try {
-                        sourceBuffer.appendBuffer(chunk);
-                    } catch (e) {
-                        handleError(e);
-                    }
+                    sourceBuffer.appendBuffer(currentGroup);
                 });
 
-                processedCount++;
-                // Remove the successfully processed chunk
-                pendingChunks.shift();
-
-            } catch (error) {
-                console.error(`Error processing chunk ${i + 1}:`, error);
-                if (error.name === 'QuotaExceededError') {
-                    await handleQuotaExceeded();
-                    // Retry this chunk
-                    i--;
-                    continue;
-                }
-                // For other errors, try to continue with next chunk
-                continue;
+                // Reset for next group
+                currentGroup = new Uint8Array(0);
+                groupSize = 0;
             }
-
-            // Small delay between chunks to ensure stability
-            await new Promise(resolve => setTimeout(resolve, 50));
         }
 
+        // Clear processed chunks
+        pendingChunks = [];
+        console.log('All chunks processed successfully');
+
     } catch (e) {
-        console.error('Fatal error in processChunkBatch:', e);
-    } finally {
-        console.log(`Processed ${processedCount} out of ${chunksToProcess.length} chunks`);
-        // If we failed to process all chunks, keep the remaining ones
-        if (processedCount < chunksToProcess.length) {
-            console.log(`${chunksToProcess.length - processedCount} chunks remaining for retry`);
-            pendingChunks = chunksToProcess.slice(processedCount);
+        console.error('Error in processChunkBatch:', e);
+        if (e.name === 'QuotaExceededError') {
+            await handleQuotaExceeded();
         }
     }
 }
