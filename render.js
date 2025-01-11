@@ -36,6 +36,12 @@ const mediaQueue = {
     mediaSourceBuffer: null,
     
     async addChunk(chunk) {
+        // Ensure chunk is a Uint8Array
+        if (!(chunk instanceof Uint8Array)) {
+            console.error('Invalid chunk format:', chunk);
+            return;
+        }
+        
         this.chunks.push(chunk);
         if (!this.isProcessing) {
             await this.processQueue();
@@ -66,7 +72,7 @@ const mediaQueue = {
             }
 
             while (this.chunks.length > 0) {
-                const chunk = this.chunks[0]; // Look at first chunk without removing
+                const chunk = this.chunks[0]; // Keep as Uint8Array
                 
                 if (sourceBuffer.updating) {
                     await new Promise(resolve => {
@@ -83,7 +89,6 @@ const mediaQueue = {
                             sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
                             sourceBuffer.removeEventListener('error', handleError);
                             
-                            // Log buffer state
                             if (sourceBuffer.buffered.length > 0) {
                                 for (let i = 0; i < sourceBuffer.buffered.length; i++) {
                                     console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
@@ -102,7 +107,7 @@ const mediaQueue = {
                         sourceBuffer.addEventListener('error', handleError);
                     });
 
-                    // Only remove chunk from queue after successful append
+                    // Only remove chunk after successful append
                     this.chunks.shift();
 
                 } catch (e) {
@@ -120,7 +125,6 @@ const mediaQueue = {
         } finally {
             this.isProcessing = false;
             if (this.chunks.length > 0) {
-                // Still have chunks to process
                 setTimeout(() => this.processQueue(), 100);
             }
         }
@@ -385,16 +389,11 @@ function setupConnection(conn) {
 
                 case 'video-chunk':
                     const chunk = new Uint8Array(data.data);
-                    pendingChunks.push({
-                        data: chunk,
-                        timeRange: data.timeRange
-                    });
+                    // Add to mediaQueue instead of pendingChunks
+                    await mediaQueue.addChunk(chunk);
                     receivedSize += chunk.byteLength;
                     
-                    if (metadataInitialized && mediaSourceReady && !sourceBuffer.updating) {
-                        const nextChunk = pendingChunks.shift();
-                        sourceBuffer.appendBuffer(nextChunk.data);
-                    }
+                    console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
                     break;
 
                 case 'video-complete':
@@ -710,7 +709,11 @@ async function processChunkBatch() {
     console.log(`Adding ${pendingChunks.length} chunks to queue...`);
     
     for (const chunk of pendingChunks) {
-        await mediaQueue.addChunk(chunk);
+        if (chunk instanceof Uint8Array) {
+            await mediaQueue.addChunk(chunk);
+        } else {
+            console.error('Invalid chunk format:', chunk);
+        }
     }
     pendingChunks = [];
 }
