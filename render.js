@@ -463,58 +463,88 @@ async function processNextSegment() {
 async function processChunkBatch() {
     if (!sourceBuffer || sourceBuffer.updating) return;
 
-    console.log(`Processing ${pendingChunks.length} chunks...`);
+    console.log(`Starting to process ${pendingChunks.length} chunks...`);
     
-    try {
-        // Process chunks sequentially with timestamps
-        let timestamp = 0;
-        for (let i = 0; i < pendingChunks.length; i++) {
-            const chunk = pendingChunks[i];
-            console.log(`Processing chunk ${i + 1}/${pendingChunks.length}, size: ${chunk.byteLength}, timestamp: ${timestamp}`);
+    // Create a working copy of chunks so we don't lose them
+    let chunksToProcess = [...pendingChunks];
+    let processedCount = 0;
 
-            await new Promise((resolve, reject) => {
-                const handleUpdateEnd = () => {
-                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                    sourceBuffer.removeEventListener('error', handleError);
-                    
-                    // Log buffer state after each append
-                    if (sourceBuffer.buffered.length > 0) {
-                        for (let j = 0; j < sourceBuffer.buffered.length; j++) {
-                            const start = sourceBuffer.buffered.start(j);
-                            const end = sourceBuffer.buffered.end(j);
-                            console.log(`Current buffer range ${j}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-                            
-                            // Calculate timestamp for next chunk based on current buffer
-                            if (j === sourceBuffer.buffered.length - 1) {
-                                timestamp = end;
+    try {
+        for (let i = 0; i < chunksToProcess.length; i++) {
+            const chunk = chunksToProcess[i];
+            console.log(`Processing chunk ${i + 1}/${chunksToProcess.length}, size: ${chunk.byteLength}`);
+
+            if (!sourceBuffer || !mediaSource || mediaSource.readyState !== 'open') {
+                console.error('Source buffer or media source became unavailable');
+                break;
+            }
+
+            try {
+                await new Promise((resolve, reject) => {
+                    if (sourceBuffer.updating) {
+                        console.log('Source buffer still updating, waiting...');
+                        sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                        return;
+                    }
+
+                    const handleUpdateEnd = () => {
+                        sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                        sourceBuffer.removeEventListener('error', handleError);
+                        
+                        // Log buffer state
+                        if (sourceBuffer.buffered.length > 0) {
+                            for (let j = 0; j < sourceBuffer.buffered.length; j++) {
+                                console.log(`After chunk ${i + 1} - Buffer range ${j}: ` +
+                                    `${sourceBuffer.buffered.start(j).toFixed(3)}s to ${sourceBuffer.buffered.end(j).toFixed(3)}s`);
                             }
                         }
+                        resolve();
+                    };
+
+                    const handleError = (err) => {
+                        sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                        sourceBuffer.removeEventListener('error', handleError);
+                        reject(err);
+                    };
+
+                    sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+                    sourceBuffer.addEventListener('error', handleError);
+
+                    try {
+                        sourceBuffer.appendBuffer(chunk);
+                    } catch (e) {
+                        handleError(e);
                     }
-                    resolve();
-                };
+                });
 
-                const handleError = (err) => {
-                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                    sourceBuffer.removeEventListener('error', handleError);
-                    reject(err);
-                };
+                processedCount++;
+                // Remove the successfully processed chunk
+                pendingChunks.shift();
 
-                sourceBuffer.addEventListener('updateend', handleUpdateEnd);
-                sourceBuffer.addEventListener('error', handleError);
+            } catch (error) {
+                console.error(`Error processing chunk ${i + 1}:`, error);
+                if (error.name === 'QuotaExceededError') {
+                    await handleQuotaExceeded();
+                    // Retry this chunk
+                    i--;
+                    continue;
+                }
+                // For other errors, try to continue with next chunk
+                continue;
+            }
 
-                sourceBuffer.appendBuffer(chunk);
-            });
-
-            // Small delay between chunks to ensure proper sequencing
-            await new Promise(resolve => setTimeout(resolve, 10));
+            // Small delay between chunks to ensure stability
+            await new Promise(resolve => setTimeout(resolve, 50));
         }
 
-        console.log('All chunks processed successfully');
-
     } catch (e) {
-        console.error('Error processing chunks:', e);
-        if (e.name === 'QuotaExceededError') {
-            await handleQuotaExceeded();
+        console.error('Fatal error in processChunkBatch:', e);
+    } finally {
+        console.log(`Processed ${processedCount} out of ${chunksToProcess.length} chunks`);
+        // If we failed to process all chunks, keep the remaining ones
+        if (processedCount < chunksToProcess.length) {
+            console.log(`${chunksToProcess.length - processedCount} chunks remaining for retry`);
+            pendingChunks = chunksToProcess.slice(processedCount);
         }
     }
 }
