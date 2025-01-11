@@ -169,16 +169,6 @@ async function setupConnection(conn) {
                     }
                     break;
 
-                case 'video-metadata':
-                    console.log('Processing metadata:', data);
-                    expectedSize = data.size;
-                    
-                    const success = await retryInitialization(videoElement, data.mimeType);
-                    if (!success) {
-                        throw new Error('Media source initialization failed after retries');
-                    }
-                    break;
-
                 case 'video-request':
                     if (isHost && videoFile) {
                         console.log('Starting video stream');
