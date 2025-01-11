@@ -30,6 +30,116 @@ let videoType = '';
 let currentTimestamp = 0;
 let lastAppendedEnd = 0;
 
+const mediaQueue = {
+    chunks: [],
+    isProcessing: false,
+    mediaSourceBuffer: null,
+    
+    async addChunk(chunk) {
+        this.chunks.push(chunk);
+        if (!this.isProcessing) {
+            await this.processQueue();
+        }
+    },
+
+    async processQueue() {
+        if (this.isProcessing || this.chunks.length === 0) return;
+        
+        this.isProcessing = true;
+        console.log(`Processing queue with ${this.chunks.length} chunks`);
+
+        try {
+            if (!mediaSource || mediaSource.readyState !== 'open') {
+                console.log('Creating new MediaSource');
+                mediaSource = new MediaSource();
+                const videoElement = document.querySelector('#video-player_html5_api');
+                videoElement.src = URL.createObjectURL(mediaSource);
+                
+                await new Promise(resolve => {
+                    mediaSource.addEventListener('sourceopen', resolve, { once: true });
+                });
+            }
+
+            if (!sourceBuffer) {
+                sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E,mp4a.40.2"');
+                sourceBuffer.mode = 'sequence';
+            }
+
+            while (this.chunks.length > 0) {
+                const chunk = this.chunks[0]; // Look at first chunk without removing
+                
+                if (sourceBuffer.updating) {
+                    await new Promise(resolve => {
+                        sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                    });
+                }
+
+                try {
+                    console.log(`Appending chunk of size ${chunk.byteLength}`);
+                    sourceBuffer.appendBuffer(chunk);
+                    
+                    await new Promise((resolve, reject) => {
+                        const handleUpdateEnd = () => {
+                            sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                            sourceBuffer.removeEventListener('error', handleError);
+                            
+                            // Log buffer state
+                            if (sourceBuffer.buffered.length > 0) {
+                                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                                    console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                                }
+                            }
+                            resolve();
+                        };
+
+                        const handleError = (err) => {
+                            sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                            sourceBuffer.removeEventListener('error', handleError);
+                            reject(err);
+                        };
+
+                        sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+                        sourceBuffer.addEventListener('error', handleError);
+                    });
+
+                    // Only remove chunk from queue after successful append
+                    this.chunks.shift();
+
+                } catch (e) {
+                    console.error('Error appending chunk:', e);
+                    if (e.name === 'QuotaExceededError') {
+                        await this.handleQuotaExceeded();
+                        continue;
+                    }
+                    break;
+                }
+            }
+
+        } catch (e) {
+            console.error('Error in queue processing:', e);
+        } finally {
+            this.isProcessing = false;
+            if (this.chunks.length > 0) {
+                // Still have chunks to process
+                setTimeout(() => this.processQueue(), 100);
+            }
+        }
+    },
+
+    async handleQuotaExceeded() {
+        if (!sourceBuffer || !sourceBuffer.buffered.length) return;
+        
+        const currentTime = player.currentTime();
+        const start = sourceBuffer.buffered.start(0);
+        const removeEnd = Math.max(start, currentTime - 10);
+        
+        await new Promise((resolve) => {
+            sourceBuffer.remove(start, removeEnd);
+            sourceBuffer.addEventListener('updateend', resolve, { once: true });
+        });
+    }
+};
+
 // Initialize the application
 function initializeApp() {
     console.log('Initializing app...');
@@ -464,88 +574,13 @@ async function processNextSegment() {
 async function processChunkBatch() {
     if (!sourceBuffer || sourceBuffer.updating) return;
 
-    console.log(`Starting to process ${pendingChunks.length} chunks...`);
+    console.log(`Adding ${pendingChunks.length} chunks to queue...`);
     
-    try {
-        // Make a copy of chunks to process
-        const chunksToProcess = [...pendingChunks];
-        pendingChunks = [];  // Clear original array
-        
-        for (let i = 0; i < chunksToProcess.length; i++) {
-            // Check media source state
-            if (mediaSource.readyState !== 'open') {
-                console.log('Reopening media source...');
-                mediaSource = new MediaSource();
-                await setupMediaSource();  // You'll need to implement this
-            }
-
-            const chunk = chunksToProcess[i];
-            console.log(`Processing chunk ${i + 1}/${chunksToProcess.length}, size: ${chunk.byteLength}`);
-
-            // Wait for any previous updates to complete
-            while (sourceBuffer.updating) {
-                await new Promise(resolve => setTimeout(resolve, 10));
-            }
-
-            // Get current buffer end time
-            let appendTime = 0;
-            if (sourceBuffer.buffered.length > 0) {
-                appendTime = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-            }
-            
-            // Set timestamp offset to ensure continuous playback
-            sourceBuffer.timestampOffset = appendTime;
-
-            try {
-                await new Promise((resolve, reject) => {
-                    const handleUpdateEnd = () => {
-                        sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                        sourceBuffer.removeEventListener('error', handleError);
-                        
-                        // Log buffer state after append
-                        if (sourceBuffer.buffered.length > 0) {
-                            for (let j = 0; j < sourceBuffer.buffered.length; j++) {
-                                const start = sourceBuffer.buffered.start(j);
-                                const end = sourceBuffer.buffered.end(j);
-                                console.log(`After chunk ${i + 1} - Buffer range ${j}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-                            }
-                        }
-                        resolve();
-                    };
-
-                    const handleError = (err) => {
-                        sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                        sourceBuffer.removeEventListener('error', handleError);
-                        reject(err);
-                    };
-
-                    sourceBuffer.addEventListener('updateend', handleUpdateEnd);
-                    sourceBuffer.addEventListener('error', handleError);
-
-                    sourceBuffer.appendBuffer(chunk);
-                });
-
-            } catch (error) {
-                console.error(`Error appending chunk ${i + 1}:`, error);
-                // Put remaining chunks back in pending
-                pendingChunks = chunksToProcess.slice(i);
-                throw error;
-            }
-
-            // Small delay between chunks
-            await new Promise(resolve => setTimeout(resolve, 20));
-        }
-
-        console.log('All chunks processed successfully');
-
-    } catch (e) {
-        console.error('Error in processChunkBatch:', e);
-        if (e.name === 'QuotaExceededError') {
-            await handleQuotaExceeded();
-        }
+    for (const chunk of pendingChunks) {
+        await mediaQueue.addChunk(chunk);
     }
+    pendingChunks = [];
 }
-
 // Helper function to append a chunk with retry logic
 async function appendChunkWithRetry(chunk, maxRetries = 3) {
     let attempt = 0;
