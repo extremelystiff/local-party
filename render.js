@@ -374,30 +374,74 @@ function handleVideoChunk(data) {
     pendingChunks.push(chunk);
     receivedSize += chunk.byteLength;
 
-    // Try to process chunk immediately
-    if (sourceBuffer && !sourceBuffer.updating) {
-        processNextChunk();
+    // Process chunks in smaller segments
+    if (pendingChunks.length >= 5 && !sourceBuffer.updating) {
+        processChunkBatch();
+    }
+}
+async function processChunkBatch() {
+    if (!sourceBuffer || sourceBuffer.updating) return;
+
+    try {
+        // Process up to 5 chunks at a time
+        const batch = pendingChunks.splice(0, 5);
+        const totalLength = batch.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+        const combinedChunk = new Uint8Array(totalLength);
+        
+        let offset = 0;
+        for (const chunk of batch) {
+            combinedChunk.set(chunk, offset);
+            offset += chunk.byteLength;
+        }
+
+        sourceBuffer.appendBuffer(combinedChunk);
+
+        // Schedule next batch
+        sourceBuffer.addEventListener('updateend', () => {
+            if (pendingChunks.length > 0) {
+                setTimeout(() => processChunkBatch(), 10);
+            }
+        }, { once: true });
+
+    } catch (e) {
+        if (e.name === 'QuotaExceededError') {
+            // If we hit quota, remove some early buffer
+            if (sourceBuffer.buffered.length > 0) {
+                const currentTime = player.currentTime();
+                const start = sourceBuffer.buffered.start(0);
+                const removeEnd = Math.max(start, currentTime - 10);
+                
+                sourceBuffer.remove(start, removeEnd);
+                // Put chunks back at the start of pending
+                pendingChunks.unshift(...batch);
+            }
+        } else {
+            console.error('Error in processChunkBatch:', e);
+        }
     }
 }
 
 function setupSourceBuffer(mimeType) {
-    if (!mediaSource || mediaSource.readyState !== 'open') {
-        return;
-    }
+    if (!mediaSource || mediaSource.readyState !== 'open') return;
 
     try {
-        // Adjust mime type for WebM if needed
         if (mimeType === 'video/webm') {
             mimeType = 'video/webm;codecs="vp8,vorbis"';
         }
         
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        sourceBuffer.mode = 'sequence';  // Changed to sequence mode
+        sourceBuffer.mode = 'segments';
         
+        // Set a reasonable buffer size (about 30 seconds)
+        const targetBufferSize = 30 * 1024 * 1024; // 30MB
+        if ('setTargetBufferSize' in sourceBuffer) {
+            sourceBuffer.setTargetBufferSize(targetBufferSize);
+        }
+
+        // Handle updateend event
         sourceBuffer.addEventListener('updateend', () => {
-            // Process next chunk if we have one
-            if (pendingChunks.length > 0) {
-                processNextChunk();
+            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                processChunkBatch();
             }
         });
 
