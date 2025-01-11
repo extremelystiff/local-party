@@ -655,13 +655,86 @@ async function processNextChunk() {
 }
 // Function to handle video metadata with proper initialization
 async function initializeMediaSource(videoElement, mimeType) {
+    if (mediaState.isInitializing) {
+        console.log('Already initializing media source');
+        return false;
+    }
+
+    mediaState.isInitializing = true;
+
     try {
-        await setupMediaSource(videoElement, mimeType);
+        // Reset all state
+        mediaState.isReady = false;
+        mediaState.hasError = false;
+        mediaState.initComplete = false;
+        pendingChunks = [];
+        receivedSize = 0;
+
+        // Clean up existing MediaSource
+        if (mediaSource) {
+            try {
+                if (mediaSource.readyState === 'open') {
+                    mediaSource.endOfStream();
+                }
+            } catch (e) {
+                console.warn('Error closing previous MediaSource:', e);
+            }
+            if (mediaState.mediaSourceUrl) {
+                URL.revokeObjectURL(mediaState.mediaSourceUrl);
+            }
+        }
+
+        // Create and set up new MediaSource
+        mediaSource = new MediaSource();
+        mediaState.mediaSourceUrl = URL.createObjectURL(mediaSource);
+
+        await new Promise((resolve, reject) => {
+            const sourceOpenHandler = () => {
+                mediaSource.removeEventListener('sourceopen', sourceOpenHandler);
+                resolve();
+            };
+            mediaSource.addEventListener('sourceopen', sourceOpenHandler);
+            videoElement.src = mediaState.mediaSourceUrl;
+        });
+
+        // Set up SourceBuffer
+        const finalMimeType = mimeType === 'video/webm' ? 
+            'video/webm;codecs="vp8,vorbis"' : mimeType;
+
+        sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
+        sourceBuffer.mode = 'segments';
+
+        // Update player source
+        if (player) {
+            player.src({
+                src: mediaState.mediaSourceUrl,
+                type: finalMimeType
+            });
+            await new Promise(resolve => {
+                player.one('loadedmetadata', () => {
+                    console.log('Video metadata loaded');
+                    resolve();
+                });
+                player.load();
+            });
+        }
+
+        // Set up completion
+        sourceBuffer.addEventListener('updateend', () => {
+            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                processNextChunk();
+            }
+        });
+
         mediaState.isReady = true;
+        mediaState.isInitializing = false;
+        console.log('Media source initialized successfully');
         return true;
+
     } catch (error) {
         console.error('Failed to initialize media source:', error);
         mediaState.hasError = true;
+        mediaState.isInitializing = false;
         return false;
     }
 }
@@ -731,29 +804,53 @@ function isStreamComplete() {
 }
 
 // Add buffer monitoring to the player
+// Update setupBufferMonitoring to be more defensive
 function setupBufferMonitoring() {
     if (!player) return;
 
-    // Monitor buffer status during playback
     player.on('timeupdate', () => {
-        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-            const currentTime = player.currentTime();
-            const bufferedEnd = sourceBuffer.buffered.end(0);
-            const bufferAhead = bufferedEnd - currentTime;
-            
-            // If buffer is running low, process more chunks
-            if (bufferAhead < 3 && pendingChunks.length > 0) {
-                console.log('Buffer running low, processing more chunks');
-                processNextChunk();
+        try {
+            if (!mediaState.isReady || !sourceBuffer || !mediaSource || 
+                mediaSource.readyState !== 'open' || !sourceBuffer.buffered) {
+                return;
             }
+
+            if (sourceBuffer.buffered.length > 0) {
+                const currentTime = player.currentTime();
+                const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                const bufferAhead = bufferedEnd - currentTime;
+                
+                console.log(`Buffer ahead: ${bufferAhead.toFixed(2)}s`);
+                
+                if (bufferAhead < 3 && pendingChunks.length > 0) {
+                    processNextChunk();
+                }
+            }
+        } catch (e) {
+            console.warn('Buffer monitoring error:', e);
         }
     });
 
-    // Handle waiting events
+    player.on('seeking', () => {
+        try {
+            if (mediaState.isReady && sourceBuffer && !sourceBuffer.updating && 
+                pendingChunks.length > 0) {
+                processNextChunk();
+            }
+        } catch (e) {
+            console.warn('Seek error:', e);
+        }
+    });
+
     player.on('waiting', () => {
         console.log('Video waiting for data');
-        if (pendingChunks.length > 0) {
-            processNextChunk();
+        try {
+            if (mediaState.isReady && sourceBuffer && !sourceBuffer.updating && 
+                pendingChunks.length > 0) {
+                processNextChunk();
+            }
+        } catch (e) {
+            console.warn('Waiting error:', e);
         }
     });
 }
@@ -795,9 +892,14 @@ function handleVideoChunk(data) {
     const percentage = ((receivedSize / expectedSize) * 100).toFixed(1);
     console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${percentage}%)`);
 
-    // Start processing if we're not already
-    if (!sourceBuffer.updating) {
-        processNextChunk();
+    // Only process if everything is ready
+    if (mediaState.isReady && sourceBuffer && mediaSource && 
+        mediaSource.readyState === 'open' && !sourceBuffer.updating) {
+        processNextChunk().catch(error => {
+            console.error('Error processing chunk:', error);
+        });
+    } else {
+        console.log('Queuing chunk for later processing');
     }
 }
 
@@ -939,7 +1041,7 @@ function onChangeFile() {
 
 // Video controls handler
 function videoControlsHandler(e) {
-    if (!allowEmit || !player) return;
+    if (!allowEmit || !player || !mediaState.isReady) return;
     
     allowEmit = false;  // Prevent control echo
     
