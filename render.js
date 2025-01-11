@@ -172,7 +172,8 @@ function setupConnection(conn) {
                             
                             console.log('Creating source buffer with MIME type:', mimeType);
                             sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                            sourceBuffer.mode = 'segments';
+                            sourceBuffer.mode = 'sequence';
+                            sourceBuffer.timestampOffset = 0;  
                             console.log('Source buffer created and mode set to segments');
                             
                             sourceBuffer.addEventListener('updateend', () => {
@@ -466,37 +467,36 @@ async function processChunkBatch() {
     console.log(`Starting to process ${pendingChunks.length} chunks...`);
     
     try {
-        // First, combine chunks into sequential groups
-        let currentGroup = new Uint8Array(0);
-        let groupSize = 0;
-        const maxGroupSize = 1024 * 1024 * 2; // 2MB per group
+        // Make a copy of chunks to process
+        const chunksToProcess = [...pendingChunks];
+        pendingChunks = [];  // Clear original array
+        
+        for (let i = 0; i < chunksToProcess.length; i++) {
+            // Check media source state
+            if (mediaSource.readyState !== 'open') {
+                console.log('Reopening media source...');
+                mediaSource = new MediaSource();
+                await setupMediaSource();  // You'll need to implement this
+            }
 
-        for (let i = 0; i < pendingChunks.length; i++) {
-            const chunk = pendingChunks[i];
-            const newSize = groupSize + chunk.byteLength;
+            const chunk = chunksToProcess[i];
+            console.log(`Processing chunk ${i + 1}/${chunksToProcess.length}, size: ${chunk.byteLength}`);
+
+            // Wait for any previous updates to complete
+            while (sourceBuffer.updating) {
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+
+            // Get current buffer end time
+            let appendTime = 0;
+            if (sourceBuffer.buffered.length > 0) {
+                appendTime = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+            }
             
-            // Create a new array with combined size
-            const newGroup = new Uint8Array(newSize);
-            // Copy existing data
-            newGroup.set(currentGroup);
-            // Add new chunk data
-            newGroup.set(new Uint8Array(chunk), groupSize);
-            
-            currentGroup = newGroup;
-            groupSize = newSize;
+            // Set timestamp offset to ensure continuous playback
+            sourceBuffer.timestampOffset = appendTime;
 
-            // If we've reached max group size or it's the last chunk, append the group
-            if (groupSize >= maxGroupSize || i === pendingChunks.length - 1) {
-                console.log(`Appending group of size ${groupSize} bytes`);
-                
-                // Log buffer state before append
-                if (sourceBuffer.buffered.length > 0) {
-                    for (let j = 0; j < sourceBuffer.buffered.length; j++) {
-                        console.log(`Before append - Buffer range ${j}: ` +
-                            `${sourceBuffer.buffered.start(j).toFixed(3)}s to ${sourceBuffer.buffered.end(j).toFixed(3)}s`);
-                    }
-                }
-
+            try {
                 await new Promise((resolve, reject) => {
                     const handleUpdateEnd = () => {
                         sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
@@ -505,8 +505,9 @@ async function processChunkBatch() {
                         // Log buffer state after append
                         if (sourceBuffer.buffered.length > 0) {
                             for (let j = 0; j < sourceBuffer.buffered.length; j++) {
-                                console.log(`After append - Buffer range ${j}: ` +
-                                    `${sourceBuffer.buffered.start(j).toFixed(3)}s to ${sourceBuffer.buffered.end(j).toFixed(3)}s`);
+                                const start = sourceBuffer.buffered.start(j);
+                                const end = sourceBuffer.buffered.end(j);
+                                console.log(`After chunk ${i + 1} - Buffer range ${j}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
                             }
                         }
                         resolve();
@@ -521,17 +522,20 @@ async function processChunkBatch() {
                     sourceBuffer.addEventListener('updateend', handleUpdateEnd);
                     sourceBuffer.addEventListener('error', handleError);
 
-                    sourceBuffer.appendBuffer(currentGroup);
+                    sourceBuffer.appendBuffer(chunk);
                 });
 
-                // Reset for next group
-                currentGroup = new Uint8Array(0);
-                groupSize = 0;
+            } catch (error) {
+                console.error(`Error appending chunk ${i + 1}:`, error);
+                // Put remaining chunks back in pending
+                pendingChunks = chunksToProcess.slice(i);
+                throw error;
             }
+
+            // Small delay between chunks
+            await new Promise(resolve => setTimeout(resolve, 20));
         }
 
-        // Clear processed chunks
-        pendingChunks = [];
         console.log('All chunks processed successfully');
 
     } catch (e) {
@@ -593,7 +597,8 @@ function setupSourceBuffer(mimeType) {
         
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
         // Change to 'segments' mode to handle discontinuous appends
-        sourceBuffer.mode = 'segments';
+        sourceBuffer.mode = 'sequence';
+        sourceBuffer.timestampOffset = 0;  
         console.log('Created source buffer in segments mode');
         
         // Initialize timestamp offset to 0
@@ -816,7 +821,8 @@ async function setupMediaSource(videoElement, mimeType) {
                             'video/webm;codecs="vp8,vorbis"' : mimeType;
 
                         sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
-                        sourceBuffer.mode = 'segments';
+                        sourceBuffer.mode = 'sequence';
+                        sourceBuffer.timestampOffset = 0;  
                         console.log('SourceBuffer created');
 
                         // Add updateend listener only once
@@ -1053,7 +1059,8 @@ async function initializeMediaSource(videoElement, mimeType) {
                         'video/webm;codecs="vp8,vorbis"' : mimeType;
                     
                     sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
-                    sourceBuffer.mode = 'segments';
+                    sourceBuffer.mode = 'sequence';
+                    sourceBuffer.timestampOffset = 0;  
                     console.log('SourceBuffer created successfully');
 
                     // Set up source buffer event listeners
