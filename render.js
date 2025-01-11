@@ -190,20 +190,29 @@ document.addEventListener("click", function (e) {
             if(localStorage.getItem("videoPath") == null || localStorage.getItem("videoSize") == null || document.getElementById("create-username").value.length == 0) {
                 document.getElementById("createRoomText").innerHTML = "Please fill in all the fields"
             } else {
+                // Initialize PeerJS for host
+                localStorage.setItem("isHost", "true")
+                initializePeer(true)
+                
                 localStorage.setItem("roomName", roomName)
                 localStorage.setItem("username", document.getElementById("create-username").value)
                 const roomCode = randomString(5, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
                 document.getElementById("createRoomText").innerHTML = ""
                 document.getElementById("roomNameText").innerHTML = roomName
                 document.getElementById("roomCodeText").innerHTML = roomCode
-                videoPlayer.setAttribute("src", localStorage.getItem("videoPath"))
+                
+                // Setup host video streaming
+                const file = document.getElementById("file-id").files[0];
+                setupHostVideo(file);
+
                 var myHeaders = new Headers();
                 myHeaders.append("Content-Type", "application/json");
 
                 var raw = JSON.stringify({
                     "roomName": roomName,
                     "roomCode": roomCode,
-                    "videoSize": localStorage.getItem("videoSize")
+                    "videoSize": localStorage.getItem("videoSize"),
+                    "hostPeerId": peer.id  // Include the peer ID
                 });
 
                 var requestOptions = {
@@ -223,7 +232,14 @@ document.addEventListener("click", function (e) {
                         });
                         localStorage.setItem("roomCode", roomCode)
                         appendData(roomName, roomCode)
-                        socket.emit('new-user-joined', { name: localStorage.getItem("username"), roomCode: roomCode, pfp: localStorage.getItem("pfpUrl") })
+                        // Include peer ID in the socket emit
+                        socket.emit('new-user-joined', { 
+                            name: localStorage.getItem("username"), 
+                            roomCode: roomCode, 
+                            pfp: localStorage.getItem("pfpUrl"),
+                            hostPeerId: peer.id,
+                            isHost: true
+                        })
                         createPage.style.display = "none"
                         document.title = `Local Party | ${roomName}`
                         roomPage.style.display = "block"
@@ -242,15 +258,18 @@ document.addEventListener("click", function (e) {
         if(inputRoomCode.length == 0) {
             document.getElementById("joinRoomText").innerHTML = "Please fill in all the fields"
         } else {
-            if(localStorage.getItem("videoPath") == null || localStorage.getItem("videoSize") == null || document.getElementById("join-username").value.length == 0) {
+            if(document.getElementById("join-username").value.length == 0) {
                 document.getElementById("joinRoomText").innerHTML = "Please fill in all the fields"
             } else {
+                // Initialize PeerJS for joining user
+                localStorage.setItem("isHost", "false")
+                initializePeer(false)
+
                 var myHeaders = new Headers();
                 myHeaders.append("Content-Type", "application/json");
 
                 var raw = JSON.stringify({
                     "roomCode": inputRoomCode,
-                    "videoSize": localStorage.getItem("videoSize")
                 });
 
                 var requestOptions = {
@@ -275,9 +294,24 @@ document.addEventListener("click", function (e) {
                         });
                         localStorage.setItem("roomCode", inputRoomCode)
                         localStorage.setItem("username", document.getElementById("join-username").value)
-                        videoPlayer.setAttribute("src", localStorage.getItem("videoPath"))
+                        
                         appendData(resp.roomName, resp.roomCode)
-                        socket.emit('new-user-joined', { name: localStorage.getItem("username"), roomCode: resp.roomCode, pfp: localStorage.getItem("pfpUrl") })
+                        // Include peer ID in socket emit
+                        socket.emit('new-user-joined', { 
+                            name: localStorage.getItem("username"), 
+                            roomCode: resp.roomCode, 
+                            pfp: localStorage.getItem("pfpUrl"),
+                            isHost: false,
+                            peerId: peer.id
+                        })
+                        
+                        // If we have the host's peer ID, connect to it
+                        if(resp.hostPeerId) {
+                            console.log("Connecting to host:", resp.hostPeerId);
+                            const conn = peer.connect(resp.hostPeerId);
+                            setupConnection(conn);
+                        }
+
                         joinPage.style.display = "none"
                         document.title = `Local Party | ${resp.roomName}`
                         roomPage.style.display = "block"
@@ -289,10 +323,19 @@ document.addEventListener("click", function (e) {
     }
 
     if(e.target.id == "roomLeaveButton") {
-        videoPlayer.setAttribute("src", "C:\Users\anshu\Desktop\Anshul\Projects\local-party\src\test.mp4")
-        socket.emit('disconnectUser', { roomCode: localStorage.getItem("roomCode"), name: localStorage.getItem("username") , pfp: localStorage.getItem("pfpUrl") })
+        // Cleanup PeerJS connections before leaving
+        if(peer) {
+            Object.values(connections).forEach(conn => conn.close());
+            peer.destroy();
+        }
+        socket.emit('disconnectUser', { 
+            roomCode: localStorage.getItem("roomCode"), 
+            name: localStorage.getItem("username"), 
+            pfp: localStorage.getItem("pfpUrl") 
+        })
         location.reload()
     }
+    
     if(e.target.id == "backButton") {
         joinPage.style.display = "none"
         createPage.style.display = "none"
@@ -407,13 +450,18 @@ function setupConnection(conn) {
     conn.on('data', handleIncomingData);
     
     conn.on('open', () => {
-        console.log('Peer connection opened:', conn.peer);
+        console.log('Peer connection successfully opened with:', conn.peer);
         notyf.success("Connected to host");
     });
     
+    conn.on('error', (err) => {
+        console.error('Peer connection error:', err);
+        notyf.error("Failed to connect to host");
+    });
+    
     conn.on('close', () => {
-        delete connections[conn.peer];
         console.log('Peer disconnected:', conn.peer);
+        delete connections[conn.peer];
     });
 }
 
