@@ -29,6 +29,7 @@ let expectedSize = 0;
 let videoType = '';
 let currentTimestamp = 0;
 let lastAppendedEnd = 0;
+let storedChunks = []; // For host to store chunks with their time ranges
 
 const mediaQueue = {
     chunks: [],
@@ -349,60 +350,62 @@ function setupConnection(conn) {
                     break;
                     
                 case 'chunk-request':
-                    if (isHost && videoFile) {
-                        const startByte = Math.floor(data.startTime * bytesPerSecond);
-                        const endByte = Math.min(Math.floor(data.endTime * bytesPerSecond), videoFile.size);
+                    if (isHost && videoFile && storedChunks.length > 0) {
+                        console.log(`Received chunk request for time range: ${data.startTime} to ${data.endTime}`);
                         
-                        const chunk = videoFile.slice(startByte, endByte);
-                        const buffer = await chunk.arrayBuffer();
+                        // Calculate approximate chunk indices based on time range
+                        const totalDuration = 13; // Duration of video in seconds
+                        const chunksPerSecond = storedChunks.length / totalDuration;
                         
-                        conn.send({
-                            type: 'video-chunk',
-                            data: buffer,
-                            timeRange: {
-                                start: data.startTime,
-                                end: data.endTime
+                        const startChunk = Math.floor(data.startTime * chunksPerSecond);
+                        const endChunk = Math.ceil(data.endTime * chunksPerSecond);
+                        
+                        console.log(`Sending chunks ${startChunk} to ${endChunk}`);
+                        
+                        // Send requested chunks
+                        for (let i = Math.max(0, startChunk); i < Math.min(storedChunks.length, endChunk); i++) {
+                            const chunk = storedChunks[i];
+                            try {
+                                conn.send({
+                                    type: 'video-chunk',
+                                    data: chunk.data,
+                                    offset: chunk.offset,
+                                    total: videoFile.size,
+                                    index: chunk.index
+                                });
+                                await new Promise(resolve => setTimeout(resolve, 50));
+                            } catch (e) {
+                                console.error('Error sending chunk:', e);
                             }
-                        });
+                        }
                     }
                     break;
 
-                case 'video-chunk':
-                    const chunk = new Uint8Array(data.data);
-                    console.log(`Processing chunk of size ${chunk.byteLength} at offset ${data.offset}`);
-                
-                    // If this chunk isn't sequential with our last append, buffer it
-                    if (pendingChunks.length === 0) {
-                        // First chunk or sequential chunk
-                        if (sourceBuffer && !sourceBuffer.updating) {
-                            try {
-                                sourceBuffer.timestampOffset = lastAppendedEnd;
+                    case 'video-chunk':
+                        const chunk = new Uint8Array(data.data);
+                        console.log(`Processing chunk ${data.index} of size ${chunk.byteLength}`);
+                    
+                        try {
+                            if (sourceBuffer && !sourceBuffer.updating) {
                                 await mediaQueue.addChunk(chunk);
-                                lastAppendedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                            } catch (e) {
-                                console.error('Error appending chunk:', e);
-                                pendingChunks.push({
-                                    data: chunk,
-                                    offset: data.offset
-                                });
+                                
+                                // Check if we need more chunks
+                                if (sourceBuffer.buffered.length > 0) {
+                                    const currentTime = player.currentTime();
+                                    const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                                    
+                                    if (bufferedEnd - currentTime < 5) { // Request more if less than 5 seconds ahead
+                                        requestMissingChunks(bufferedEnd, bufferedEnd + 10);
+                                    }
+                                }
+                            } else {
+                                pendingChunks.push(chunk);
                             }
-                        } else {
-                            pendingChunks.push({
-                                data: chunk,
-                                offset: data.offset
-                            });
+                            receivedSize += chunk.byteLength;
+                        } catch (e) {
+                            console.error('Error processing chunk:', e);
                         }
-                    } else {
-                        // Add to pending chunks in order
-                        let inserted = false;
-                        for (let i = 0; i < pendingChunks.length; i++) {
-                            if (data.offset < pendingChunks[i].offset) {
-                                pendingChunks.splice(i, 0, {
-                                    data: chunk,
-                                    offset: data.offset
-                                });
-                                inserted = true;
-                                break;
+                        break;
                             }
                         }
                         if (!inserted) {
@@ -1151,11 +1154,9 @@ async function startStreamingTo(conn) {
         }
 
         console.log('Starting video stream with file:', videoFile);
-
-        // Get proper MIME type from file
         const mimeType = getVideoMimeType(videoFile);
-
-        // Send metadata with proper MIME type
+        
+        // Send metadata
         const metadata = {
             type: 'video-metadata',
             name: videoFile.name,
@@ -1164,26 +1165,36 @@ async function startStreamingTo(conn) {
             lastModified: videoFile.lastModified
         };
         
-        console.log('Sending metadata:', metadata);
         conn.send(metadata);
-
-        // Add delay to ensure metadata is processed
         await new Promise(resolve => setTimeout(resolve, 1000));
 
+        // Clear stored chunks for new connection
+        storedChunks = [];
+        
         // Stream chunks
         let offset = 0;
+        let chunkIndex = 0;
         while (offset < videoFile.size) {
             const chunk = videoFile.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
+            
+            // Store chunk with index for later retrieval
+            storedChunks.push({
+                index: chunkIndex,
+                data: buffer,
+                offset: offset
+            });
             
             conn.send({
                 type: 'video-chunk',
                 data: buffer,
                 offset: offset,
-                total: videoFile.size
+                total: videoFile.size,
+                index: chunkIndex
             });
             
             offset += buffer.byteLength;
+            chunkIndex++;
             await new Promise(resolve => setTimeout(resolve, 50));
         }
         
