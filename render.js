@@ -161,25 +161,32 @@ function setupConnection(conn) {
                     videoElement.src = URL.createObjectURL(mediaSource);
                     console.log('Set video element source');
                     
-                    mediaSource.addEventListener('sourceopen', () => {
-                        try {
-                            console.log('MediaSource opened, state:', mediaSource.readyState);
-                            
-                            let mimeType = data.mimeType;
-                            if (data.mimeType === 'video/webm') {
-                                mimeType = 'video/webm;codecs="vp8,vorbis"';
-                            }
-                            
-                            console.log('Creating source buffer with MIME type:', mimeType);
-                            sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                            sourceBuffer.mode = 'segments';
-                            console.log('Source buffer created and mode set to segments');
-                            
-                            sourceBuffer.addEventListener('updateend', () => {
-    if (!mediaSourceReady) {
-        mediaSourceReady = true;
-        console.log('MediaSource ready for chunks');
+mediaSource.addEventListener('sourceopen', () => {
+    try {
+        console.log('MediaSource opened');
+        
+        let mimeType = data.mimeType;
+        if (data.mimeType === 'video/webm') {
+            mimeType = 'video/webm;codecs="vp8,vorbis"';
+        }
+        
+        console.log('Creating source buffer with MIME type:', mimeType);
+        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+        sourceBuffer.mode = 'segments';
+        console.log('Source buffer created and mode set to segments');
+        
+        sourceBuffer.addEventListener('updateend', () => {
+            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                processNextChunk();
+            }
+        });
+
+        mediaState.isReady = true;
+    } catch (error) {
+        console.error('Error in sourceopen:', error);
+        mediaState.hasError = true;
     }
+});
     
     // Process next chunk if available
     if (pendingChunks.length > 0 && !sourceBuffer.updating) {
@@ -767,71 +774,25 @@ function processNextChunk() {
     }
 
     try {
-        // Check current buffer state
-        if (sourceBuffer.buffered.length > 0) {
-            // Find any gaps in the buffer
-            for (let i = 0; i < sourceBuffer.buffered.length - 1; i++) {
-                const gap = sourceBuffer.buffered.start(i + 1) - sourceBuffer.buffered.end(i);
-                console.log(`Gap detected: ${sourceBuffer.buffered.end(i)} to ${sourceBuffer.buffered.start(i + 1)}`);
-                
-                // If there's a significant gap, focus on filling it
-                if (gap > 0.1) {
-                    console.log(`Attempting to fill gap of ${gap}s`);
-                }
-            }
-        }
-
         const chunk = pendingChunks[0];
         sourceBuffer.appendBuffer(chunk);
         pendingChunks.shift();
 
-        // After append, verify the buffer state
-        sourceBuffer.addEventListener('updateend', () => {
-            if (sourceBuffer.buffered.length > 0) {
-                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                    const start = sourceBuffer.buffered.start(i);
-                    const end = sourceBuffer.buffered.end(i);
-                    console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-                }
-
-                // If we detect gaps, try to fill them immediately
-                if (sourceBuffer.buffered.length > 1) {
-                    const currentTime = player.currentTime();
-                    
-                    // Find the range we're currently playing from
-                    for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                        const rangeStart = sourceBuffer.buffered.start(i);
-                        const rangeEnd = sourceBuffer.buffered.end(i);
-                        
-                        if (currentTime >= rangeStart && currentTime <= rangeEnd) {
-                            // If we're near the end of this range and there's another range
-                            if (i < sourceBuffer.buffered.length - 1 && 
-                                rangeEnd - currentTime < 2) {
-                                const nextRangeStart = sourceBuffer.buffered.start(i + 1);
-                                const gap = nextRangeStart - rangeEnd;
-                                console.log(`Near end of range ${i}, gap to next range: ${gap}s`);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            // Continue processing if we have more chunks
-            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                processNextChunk();
-            }
-        }, { once: true });
+        // Log buffer status after append
+        if (sourceBuffer.buffered.length > 0) {
+            const start = sourceBuffer.buffered.start(0);
+            const end = sourceBuffer.buffered.end(0);
+            console.log(`Buffer status: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
+        }
 
     } catch (e) {
         console.error('Error processing chunk:', e);
         if (e.name === 'QuotaExceededError') {
             if (sourceBuffer.buffered.length > 0) {
-                const currentTime = player.currentTime();
                 const start = sourceBuffer.buffered.start(0);
-                // Keep more buffer (60 seconds) before removing
-                sourceBuffer.remove(start, Math.max(start, currentTime - 60));
-                pendingChunks.unshift(chunk);
+                const currentTime = player.currentTime();
+                sourceBuffer.remove(start, Math.max(start, currentTime - 10));
+                pendingChunks.unshift(chunk); // Put chunk back
             }
         }
     }
@@ -1017,44 +978,31 @@ function setupBufferMonitoring() {
     if (!player) return;
 
     player.on('timeupdate', () => {
-        logBufferStatus();
-        
-        const currentTime = player.currentTime();
-        
-        // Check if we're approaching a gap
         if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-            let inBufferedRange = false;
+            const currentTime = player.currentTime();
+            
+            // Check all buffer ranges
             for (let i = 0; i < sourceBuffer.buffered.length; i++) {
                 const start = sourceBuffer.buffered.start(i);
                 const end = sourceBuffer.buffered.end(i);
                 
+                // If we're in this range and near the end
                 if (currentTime >= start && currentTime <= end) {
-                    inBufferedRange = true;
-                    // If we're getting close to the end of this range
-                    if (end - currentTime < 3) {
-                        console.log("Approaching end of buffer range, processing more chunks if available");
+                    if (end - currentTime < 3) {  // If less than 3 seconds ahead
                         if (pendingChunks.length > 0 && !sourceBuffer.updating) {
                             processNextChunk();
                         }
                     }
-                    break;
-                }
-            }
-            
-            if (!inBufferedRange) {
-                console.log("Playhead outside buffered ranges!");
-                // Try to load the appropriate segment
-                if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                    processNextChunk();
                 }
             }
         }
     });
 
-    // Add seeking listener
-    player.on('seeking', () => {
-        console.log("Seek detected");
-        logBufferStatus();
+    player.on('waiting', () => {
+        console.log('Video waiting for data');
+        if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+            processNextChunk();
+        }
     });
 }
 // Add a buffer check function
