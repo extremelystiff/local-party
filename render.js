@@ -20,11 +20,16 @@ let isHost = false;
 let player = null;
 let allowEmit = true;
 
+let mediaSource = null;
+let sourceBuffer = null;
+let pendingChunks = [];
+let isBuffering = false;
+
 function initializeApp() {
     console.log('Initializing app...');
     
     try {
-        // First initialize video.js
+        // Initialize video.js with MediaSource support
         player = videojs('video-player', {
             controls: true,
             preload: 'auto',
@@ -36,7 +41,8 @@ function initializeApp() {
                 nativeVideoTracks: false,
                 nativeAudioTracks: false,
                 nativeTextTracks: false
-            }
+            },
+            techOrder: ['html5']
         });
         
         console.log('Video.js initialized');
@@ -44,18 +50,23 @@ function initializeApp() {
         // Add error handling
         player.on('error', function() {
             console.error('Video.js error:', player.error());
+            // Try to recover
+            if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+                processNextChunk();
+            }
         });
 
-        // Add video control handlers
-        player.on('play', videoControlsHandler);
-        player.on('pause', videoControlsHandler);
-        
+        player.on('waiting', function() {
+            console.log('Video waiting for data');
+            if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+                processNextChunk();
+            }
+        });
+
         // Show landing page
         if (landingPage) {
             landingPage.style.display = "block";
             console.log('Landing page displayed');
-        } else {
-            console.error('Landing page element not found');
         }
     } catch (e) {
         console.error('Initialization error:', e);
@@ -214,106 +225,82 @@ let videoType = '';
 function handleVideoMetadata(data) {
     console.log('Received video metadata:', data);
     expectedSize = data.size;
-    videoType = data.type || 'video/webm';  // Ensure we have a default MIME type
+    videoType = data.type || 'video/webm';
     receivedChunks = [];
     receivedSize = 0;
+    pendingChunks = [];
     
-    // Clean up any existing video sources
+    // Create new MediaSource
+    mediaSource = new MediaSource();
+    const url = URL.createObjectURL(mediaSource);
+
+    // Set up MediaSource events
+    mediaSource.addEventListener('sourceopen', () => {
+        console.log('MediaSource opened');
+        try {
+            sourceBuffer = mediaSource.addSourceBuffer(videoType);
+            sourceBuffer.addEventListener('updateend', processNextChunk);
+            notyf.success("Starting to receive video");
+        } catch (e) {
+            console.error('Error setting up source buffer:', e);
+            notyf.error("Error setting up video stream");
+        }
+    });
+
+    // Update video source
     if (player) {
-        player.pause();
-        player.src('');
+        player.src({ src: url, type: videoType });
         player.load();
     }
-    
-    console.log('Preparing to receive video:', {
-        expectedSize,
-        videoType,
-        name: data.name
-    });
-    
-    notyf.success("Starting to receive video");
+}
+
+function processNextChunk() {
+    if (!sourceBuffer || !pendingChunks.length || sourceBuffer.updating) {
+        return;
+    }
+
+    try {
+        const chunk = pendingChunks.shift();
+        sourceBuffer.appendBuffer(chunk);
+    } catch (e) {
+        console.error('Error appending buffer:', e);
+        // If error, try to process next chunk
+        if (pendingChunks.length) {
+            setTimeout(processNextChunk, 100);
+        }
+    }
 }
 
 function handleVideoChunk(data) {
     try {
-        // Store the raw ArrayBuffer data
-        receivedChunks.push(data.data);
-        receivedSize += data.data.byteLength;
+        const chunk = new Uint8Array(data.data);
+        receivedSize += chunk.byteLength;
         
         const percentage = Math.round((receivedSize / data.total) * 100);
         console.log(`Received chunk: ${receivedSize}/${data.total} bytes (${percentage}%)`);
-        
-        if (receivedSize === expectedSize) {
-            console.log('All chunks received, creating video blob');
-            
-            // Combine all chunks into a single ArrayBuffer
-            const fullBuffer = new Uint8Array(receivedSize);
-            let offset = 0;
-            
-            for (const chunk of receivedChunks) {
-                const chunkArray = new Uint8Array(chunk);
-                fullBuffer.set(chunkArray, offset);
-                offset += chunk.byteLength;
-            }
-            
-            const blob = new Blob([fullBuffer], { type: videoType });
-            console.log('Created blob:', {
-                size: blob.size,
-                type: blob.type,
-                expectedSize: expectedSize
-            });
 
-            // Create object URL
-            const url = URL.createObjectURL(blob);
-            
-            // Dispose of the current player and reinitialize
-            if (player) {
-                player.dispose();
-            }
-            
-            // Reinitialize video.js player
-            player = videojs('video-player', {
-                controls: true,
-                preload: 'auto',
-                fluid: true,
-                html5: {
-                    vhs: {
-                        overrideNative: true
-                    },
-                    nativeVideoTracks: false,
-                    nativeAudioTracks: false,
-                    nativeTextTracks: false
-                },
-                sources: [{
-                    src: url,
-                    type: videoType
-                }]
-            });
-            
-            player.ready(() => {
-                console.log('Video.js player ready with new source');
-                player.load();
-                player.play().catch(e => {
-                    console.error('Error playing video:', e);
-                });
-                
-                player.on('loadedmetadata', () => {
-                    console.log('Video metadata loaded:', {
-                        duration: player.duration(),
-                        videoWidth: player.videoWidth(),
-                        videoHeight: player.videoHeight()
-                    });
-                });
-                
-                player.on('error', (e) => {
-                    console.error('Video.js error:', player.error());
-                });
-            });
-            
-            receivedChunks = [];
-            receivedSize = 0;
-            notyf.success("Video ready to play");
+        // Add chunk to pending queue
+        pendingChunks.push(chunk);
+
+        // Try to process chunk
+        if (sourceBuffer && !sourceBuffer.updating) {
+            processNextChunk();
         }
+
+        // If all chunks received
+        if (receivedSize === expectedSize) {
+            console.log('All chunks received');
+            
+            // Wait for all chunks to be processed
+            const checkComplete = setInterval(() => {
+                if (pendingChunks.length === 0 && !sourceBuffer.updating) {
+                    clearInterval(checkComplete);
+                    mediaSource.endOfStream();
+                    notyf.success("Video ready to play");
+                }
+            }, 100);
+        }
+
     } catch (error) {
         console.error('Error handling video chunk:', error);
         notyf.error("Error processing video chunk: " + error.message);
