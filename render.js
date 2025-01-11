@@ -234,17 +234,18 @@ function appendData(roomName, roomCode) {
 
 // File Handlers
 function onChangeFile() {
-    const file = document.getElementById("file-id").files[0];
-    if (file && isHost) {
-        videoFile = file;
-        const path = (window.URL || window.webkitURL).createObjectURL(file);
-        videoPlayer.src = path;
-        console.log('Host video file loaded:', {
-            name: file.name,
-            size: file.size,
-            type: file.type
-        });
-    }
+    const fileInput = document.getElementById("file-id");
+    if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
+    
+    const file = fileInput.files[0];
+    videoFile = file;  // Set videoFile regardless of host status during file selection
+    const path = (window.URL || window.webkitURL).createObjectURL(file);
+    videoPlayer.src = path;
+    console.log('Video file loaded:', {
+        name: file.name,
+        size: file.size,
+        type: file.type
+    });
 }
 
 // Video Control Handler
@@ -296,9 +297,15 @@ document.addEventListener("click", function(e) {
             return;
         }
         
-        if (!videoFile) {
+        const fileInput = document.getElementById("file-id");
+        if (!fileInput || !fileInput.files || !fileInput.files[0]) {
             document.getElementById("createRoomText").innerHTML = "Please select a video file";
             return;
+        }
+        
+        // Ensure videoFile is set
+        if (!videoFile) {
+            videoFile = fileInput.files[0];
         }
         
         localStorage.setItem("username", username);
