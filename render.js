@@ -84,7 +84,7 @@ function setupConnection(conn) {
         console.error('Connection error:', err);
         notyf.error("Connection error occurred");
     });
-}
+
             append({
                 name: data.username,
                 content: data.message,
