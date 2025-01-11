@@ -430,7 +430,6 @@ function handleVideoChunk(data) {
         console.error('Error handling video chunk:', error);
         notyf.error("Error processing video chunk: " + error.message);
     }
-}
         
         const percentage = Math.round((receivedSize / data.total) * 100);
         console.log(`Received chunk: ${receivedSize}/${data.total} bytes (${percentage}%)`);
@@ -466,12 +465,12 @@ function handleVideoChunk(data) {
                     }
                 }
             }, 100);
-        }
+        
     } catch (error) {
         console.error('Error handling video chunk:', error);
         notyf.error("Error processing video chunk: " + error.message);
     }
-}
+}};
 
 // Handle video controls
 function handleVideoControl(data) {
