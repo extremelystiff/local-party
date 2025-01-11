@@ -180,8 +180,16 @@ function setupConnection(conn) {
                                     mediaSourceReady = true;
                                     console.log('MediaSource ready for chunks');
                                 }
+                                
+                                // Always try to process next chunk when current update ends
                                 if (pendingChunks.length > 0) {
                                     processNextChunk();
+                                } else if (metadataInitialized && mediaSourceReady) {
+                                    // If we've processed all chunks and received the complete signal
+                                    console.log('All chunks processed');
+                                    if (mediaSource.readyState === 'open') {
+                                        mediaSource.endOfStream();
+                                    }
                                 }
                             });
 
@@ -189,21 +197,28 @@ function setupConnection(conn) {
                                 console.error('SourceBuffer error:', e);
                             });
 
+                            // Add buffer monitoring to the player
+                            player.on('timeupdate', checkBuffer);
+                            player.on('waiting', () => {
+                                console.log('Video waiting for data');
+                                if (pendingChunks.length > 0) {
+                                    processNextChunk();
+                                }
+                            });
+
                             metadataInitialized = true;
                             console.log('Metadata initialized, ready for chunks');
                             
                             // Process any queued chunks
-                            // Always try to process next chunk when current update ends
                             if (pendingChunks.length > 0) {
+                                console.log(`Processing ${pendingChunks.length} queued chunks`);
                                 processNextChunk();
-                            } else if (metadataInitialized && mediaSourceReady) {
-                                // If we've processed all chunks and received the complete signal
-                                console.log('All chunks processed');
-                                if (mediaSource.readyState === 'open') {
-                                    mediaSource.endOfStream();
-                                }
                             }
-                        });
+                        } catch (e) {
+                            console.error('Error in sourceopen:', e);
+                            notyf.error("Error setting up video: " + e.message);
+                        }
+                    });
 
                     mediaSource.addEventListener('sourceended', () => {
                         console.log('MediaSource ended');
