@@ -262,7 +262,7 @@ function handleVideoMetadata(data) {
         console.error('Error in handleVideoMetadata:', e);
         notyf.error("Error setting up video stream: " + e.message);
     }
-}
+
     
     try {
         // Reset state
