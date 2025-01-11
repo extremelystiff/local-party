@@ -268,10 +268,10 @@ document.addEventListener("click", function(e) {
     }
     
     else if (e.target.id === "roomJoinButton") {
-        const roomCode = document.getElementById("roomCode").value;
+        const hostPeerId = document.getElementById("roomCode").value;
         const username = document.getElementById("join-username").value;
         
-        if (!roomCode || !username) {
+        if (!hostPeerId || !username) {
             document.getElementById("joinRoomText").innerHTML = "Please fill in all fields";
             return;
         }
@@ -279,14 +279,29 @@ document.addEventListener("click", function(e) {
         localStorage.setItem("isHost", "false");
         localStorage.setItem("username", username);
         
+        // Initialize peer and wait for connection to be established
         initializePeer(false);
-        const conn = peer.connect(roomCode);
-        setupConnection(conn);
         
-        document.getElementById("roomCodeText").innerHTML = roomCode;
-        joinPage.style.display = "none";
-        document.title = "Local Party | Room";
-        roomPage.style.display = "block";
+        peer.on('open', () => {
+            console.log('Connecting to host:', hostPeerId);
+            const conn = peer.connect(hostPeerId);
+            
+            conn.on('open', () => {
+                console.log('Connected to host successfully');
+                setupConnection(conn);
+                document.getElementById("roomCodeText").innerHTML = hostPeerId;
+                joinPage.style.display = "none";
+                document.title = "Local Party | Room";
+                roomPage.style.display = "block";
+                appendData("Room", hostPeerId);
+            });
+            
+            conn.on('error', (err) => {
+                console.error('Connection error:', err);
+                document.getElementById("joinRoomText").innerHTML = "Failed to connect to room";
+                notyf.error("Failed to connect to room");
+            });
+        });
     }
     
     else if (e.target.id === "roomLeaveButton") {
