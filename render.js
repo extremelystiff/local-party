@@ -48,38 +48,37 @@ const mediaQueue = {
         }
     },
 
-    async processQueue() {
+async processQueue() {
     if (this.isProcessing || this.chunks.length === 0) return;
     
     this.isProcessing = true;
     console.log(`Processing queue with ${this.chunks.length} chunks`);
 
     try {
-        // Create combined buffer from all chunks
-        const totalSize = this.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-        const combinedBuffer = new Uint8Array(totalSize);
-        let offset = 0;
-
-        // Combine all chunks in sequence
         for (const chunk of this.chunks) {
-            combinedBuffer.set(new Uint8Array(chunk), offset);
-            offset += chunk.byteLength;
-        }
+            if (!sourceBuffer || sourceBuffer.updating) {
+                await new Promise(resolve => {
+                    sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                });
+            }
 
-        // Append the combined buffer
-        if (sourceBuffer && !sourceBuffer.updating) {
-            console.log(`Appending combined buffer of size ${totalSize}`);
-            sourceBuffer.appendBuffer(combinedBuffer);
+            // Set timestamp offset to maintain continuity
+            if (sourceBuffer.buffered.length > 0) {
+                const lastEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                sourceBuffer.timestampOffset = lastEnd;
+            }
+
+            sourceBuffer.appendBuffer(chunk);
             
+            // Wait for append to complete
             await new Promise((resolve, reject) => {
                 const handleUpdateEnd = () => {
                     sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
                     sourceBuffer.removeEventListener('error', handleError);
                     
-                    // Log final buffer state
                     if (sourceBuffer.buffered.length > 0) {
                         for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                            console.log(`Final buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                            console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
                         }
                     }
                     resolve();
@@ -94,10 +93,10 @@ const mediaQueue = {
                 sourceBuffer.addEventListener('updateend', handleUpdateEnd);
                 sourceBuffer.addEventListener('error', handleError);
             });
-
-            // Clear processed chunks
-            this.chunks = [];
         }
+
+        // Clear processed chunks
+        this.chunks = [];
 
     } catch (e) {
         console.error('Error in queue processing:', e);
@@ -287,6 +286,7 @@ function setupConnection(conn) {
                     console.log('Processing metadata:', data);
                     expectedSize = data.size;
                     duration = data.duration;
+                    lastAppendedEnd = 0
                     bytesPerSecond = data.size / data.duration;
                     
                     // Reset previous MediaSource
@@ -369,13 +369,51 @@ function setupConnection(conn) {
 
                 case 'video-chunk':
                     const chunk = new Uint8Array(data.data);
-                    console.log(`Processing chunk of size ${chunk.byteLength}`); // Debug log
+                    console.log(`Processing chunk of size ${chunk.byteLength} at offset ${data.offset}`);
                 
-                    // Add directly to mediaQueue
-                    await mediaQueue.addChunk(chunk);
-                    receivedSize += chunk.byteLength;
+                    // If this chunk isn't sequential with our last append, buffer it
+                    if (pendingChunks.length === 0) {
+                        // First chunk or sequential chunk
+                        if (sourceBuffer && !sourceBuffer.updating) {
+                            try {
+                                sourceBuffer.timestampOffset = lastAppendedEnd;
+                                await mediaQueue.addChunk(chunk);
+                                lastAppendedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                            } catch (e) {
+                                console.error('Error appending chunk:', e);
+                                pendingChunks.push({
+                                    data: chunk,
+                                    offset: data.offset
+                                });
+                            }
+                        } else {
+                            pendingChunks.push({
+                                data: chunk,
+                                offset: data.offset
+                            });
+                        }
+                    } else {
+                        // Add to pending chunks in order
+                        let inserted = false;
+                        for (let i = 0; i < pendingChunks.length; i++) {
+                            if (data.offset < pendingChunks[i].offset) {
+                                pendingChunks.splice(i, 0, {
+                                    data: chunk,
+                                    offset: data.offset
+                                });
+                                inserted = true;
+                                break;
+                            }
+                        }
+                        if (!inserted) {
+                            pendingChunks.push({
+                                data: chunk,
+                                offset: data.offset
+                            });
+                        }
+                    }
                     
-                    console.log(`Total received: ${receivedSize}/${expectedSize} bytes (${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
+                    receivedSize += chunk.byteLength;
                     break;
 
                 case 'video-complete':
