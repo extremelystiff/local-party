@@ -84,14 +84,12 @@ function setupConnection(conn) {
         console.error('Connection error:', err);
         notyf.error("Connection error occurred");
     });
-}
+
             append({
                 name: data.username,
                 content: data.message,
                 pfp: data.pfp
             });
-        
-    
     conn.on('open', () => {
         console.log('Connection opened to:', conn.peer);
         if (localStorage.getItem("isHost") !== "true") {
@@ -109,7 +107,7 @@ function setupConnection(conn) {
             pfp: '#f3dfbf'
         });
     });
-
+}
 
 // Stream video to peers
 async function startStreamingTo(conn) {
