@@ -21,16 +21,18 @@ function initializePeer(isHost) {
     peer.on('open', (id) => {
         console.log('Connected to PeerJS with ID:', id);
         if (isHost) {
+            console.log('Initialized as host with video:', videoFile?.name);
             document.getElementById("roomCodeText").innerHTML = id;
+            localStorage.setItem("isHost", "true"); // Ensure host status is set
         }
     });
 
     peer.on('connection', (conn) => {
         console.log('Incoming connection from:', conn.peer);
-        setupConnection(conn);
-        if (localStorage.getItem("isHost") === "true" && videoFile) {
-            startStreamingTo(conn);
+        if (isHost && videoFile) {
+            console.log('Host ready to stream video:', videoFile.name);
         }
+        setupConnection(conn);
     });
 
     peer.on('error', (err) => {
@@ -84,8 +86,6 @@ function setupConnection(conn) {
         console.error('Connection error:', err);
         notyf.error("Connection error occurred");
     });
-
-
     
     conn.on('open', () => {
         console.log('Connection opened to:', conn.peer);
@@ -109,10 +109,11 @@ function setupConnection(conn) {
 // Stream video to peers
 async function startStreamingTo(conn) {
     try {
-        console.log('Starting video stream, file:', videoFile);
         if (!videoFile) {
             throw new Error('No video file available');
         }
+
+        console.log('Starting video stream for peer:', conn.peer);
 
         // Send metadata first
         conn.send({
@@ -122,38 +123,51 @@ async function startStreamingTo(conn) {
             type: videoFile.type
         });
 
-        console.log('Sent video metadata:', {
-            name: videoFile.name,
-            size: videoFile.size,
-            type: videoFile.type
-        });
-
-        // Start streaming chunks
+        // Stream the chunks
         let offset = 0;
         while (offset < videoFile.size) {
             const chunk = videoFile.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
             
-            if (conn.open) {
-                conn.send({
-                    type: 'video-chunk',
-                    data: buffer,
-                    offset: offset,
-                    total: videoFile.size
-                });
-                
-                offset += CHUNK_SIZE;
-                await new Promise(resolve => setTimeout(resolve, 10)); // Throttle sending
-            } else {
-                throw new Error('Connection closed during streaming');
-            }
+            conn.send({
+                type: 'video-chunk',
+                data: buffer,
+                offset: offset,
+                total: videoFile.size
+            });
+            
+            offset += CHUNK_SIZE;
+            await new Promise(resolve => setTimeout(resolve, 10)); // Control sending rate
         }
         
-        console.log('Video streaming completed');
-        notyf.success("Video streaming completed");
+        console.log('Video streaming completed to peer:', conn.peer);
+        notyf.success("Video sent to peer");
     } catch (err) {
         console.error('Error streaming video:', err);
         notyf.error("Error streaming video: " + err.message);
+    }
+}
+
+function handleVideoMetadata(data) {
+    console.log('Received video metadata:', data);
+    expectedSize = data.size;
+    videoType = data.type;
+    receivedChunks = [];
+    receivedSize = 0;
+    notyf.success("Starting to receive video");
+}
+
+function handleVideoChunk(data) {
+    receivedChunks.push(data.data);
+    receivedSize += data.data.byteLength;
+    
+    if (receivedSize === expectedSize) {
+        console.log('All chunks received, creating video blob');
+        const blob = new Blob(receivedChunks, { type: videoType });
+        const url = URL.createObjectURL(blob);
+        videoPlayer.src = url;
+        receivedChunks = [];
+        notyf.success("Video received successfully");
     }
 }
 
