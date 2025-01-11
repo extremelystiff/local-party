@@ -688,7 +688,7 @@ async function handleVideoMetadata(data, videoElement) {
             'video/webm;codecs="vp8,vorbis"' : data.mimeType;
 
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        sourceBuffer.mode = 'sequence';
+        sourceBuffer.mode = 'segments';
         
         // Set up player source
         if (player) {
@@ -719,8 +719,18 @@ async function handleVideoMetadata(data, videoElement) {
 // Process next chunk in queue
 // Improved chunk processing function with better buffer management
 function processNextChunk() {
-    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0) {
+    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0 || !mediaSource || mediaSource.readyState !== 'open') {
         return;
+    }
+    
+    // Check if we need to remove old data to prevent memory issues
+    if (sourceBuffer.buffered.length > 0) {
+        const currentTime = player.currentTime();
+        const start = sourceBuffer.buffered.start(0);
+        if (start < currentTime - 60) { // Keep 60 seconds behind current playback
+            sourceBuffer.remove(start, currentTime - 30);
+            return; // Wait for updateend event
+        }
     }
 
     try {
@@ -741,21 +751,22 @@ function processNextChunk() {
             }
 
             // Continue processing if we have more chunks
-            if (pendingChunks.length > 0) {
+            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
                 processNextChunk();
-            } else if (receivedSize >= expectedSize) {
-                // Only end stream if we've processed everything
+            } else if (receivedSize >= expectedSize && pendingChunks.length === 0) {
+                // Only end stream if we've processed absolutely everything
                 const buffered = sourceBuffer.buffered;
                 if (buffered.length > 0) {
                     const totalBuffered = buffered.end(buffered.length - 1) - buffered.start(0);
                     console.log(`Final buffered duration: ${totalBuffered}s`);
                     
-                    if (totalBuffered > 5) { // Make sure we have significant buffer before ending
-                        console.log('All chunks processed, ending stream');
-                        if (mediaSource && mediaSource.readyState === 'open') {
+                    // Add a small delay before ending the stream to ensure all data is processed
+                    setTimeout(() => {
+                        if (mediaSource && mediaSource.readyState === 'open' && !sourceBuffer.updating) {
+                            console.log('All chunks processed, ending stream');
                             mediaSource.endOfStream();
                         }
-                    }
+                    }, 1000);
                 }
             }
         }, { once: true });
