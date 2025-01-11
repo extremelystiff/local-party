@@ -760,6 +760,29 @@ function initializePlayerEvents() {
             processChunkBatch();
         }
     });
+
+    // Handle play/pause events
+    player.on('play', () => {
+        console.log('Local play event');
+        if (!allowEmit) return;
+        
+        broadcastVideoControl('play');
+    });
+
+    player.on('pause', () => {
+        console.log('Local pause event');
+        if (!allowEmit) return;
+        
+        broadcastVideoControl('pause');
+    });
+
+    // Handle seeking
+    player.on('seeking', () => {
+        console.log('Local seek event');
+        if (!allowEmit) return;
+        
+        broadcastVideoControl('seek');
+    });
 }
 // Helper function to handle chat messages
 function handleChatMessage(data) {
@@ -770,6 +793,29 @@ function handleChatMessage(data) {
     });
 }
 
+function broadcastVideoControl(action) {
+    allowEmit = false;  // Prevent echo
+    const currentTime = player.currentTime();
+    
+    console.log(`Broadcasting ${action} at time ${currentTime}`);
+    
+    const controlData = {
+        type: 'control',
+        action: action,
+        time: currentTime,
+        username: localStorage.getItem("username")
+    };
+    
+    // Send to all connected peers
+    Object.values(connections).forEach(conn => {
+        if (conn.open) {
+            conn.send(controlData);
+        }
+    });
+
+    // Re-enable control emission after a delay
+    setTimeout(() => { allowEmit = true; }, 500);
+}
 // Helper function to handle connection close
 function handleConnectionClose(conn) {
     console.log('Connection closed:', conn.peer);
@@ -1341,32 +1387,48 @@ function handleVideoControl(data) {
     allowEmit = false;  // Prevent echo
     
     try {
-        // Always sync time first
-        if (Math.abs(player.currentTime() - data.time) > 0.5) {
-            console.log(`Syncing time from ${player.currentTime()} to ${data.time}`);
-            player.currentTime(data.time);
+        const currentTime = player.currentTime();
+        console.log(`Received ${data.action} command at time ${data.time}, current time: ${currentTime}`);
+
+        switch(data.action) {
+            case 'play':
+                if (player.paused()) {
+                    // First sync time if needed
+                    if (Math.abs(currentTime - data.time) > 0.5) {
+                        player.currentTime(data.time);
+                    }
+                    player.play().catch(e => console.error('Play failed:', e));
+                }
+                break;
+                
+            case 'pause':
+                if (!player.paused()) {
+                    player.pause();
+                    // Sync time after pausing
+                    if (Math.abs(currentTime - data.time) > 0.5) {
+                        player.currentTime(data.time);
+                    }
+                }
+                break;
+                
+            case 'seek':
+                if (Math.abs(currentTime - data.time) > 0.5) {
+                    console.log(`Seeking from ${currentTime} to ${data.time}`);
+                    player.currentTime(data.time);
+                }
+                break;
         }
 
-        // Then handle play/pause
-        if (data.action === 'play' && player.paused()) {
-            console.log('Remote play command received');
-            player.play().catch(e => console.error('Play failed:', e));
-            const content = time("played", data.username || "Someone", data.time);
-            append({
-                name: "Local Party",
-                content: content,
-                pfp: "#f3dfbf"
-            });
-        } else if (data.action === 'pause' && !player.paused()) {
-            console.log('Remote pause command received');
-            player.pause();
-            const content = time("paused", data.username || "Someone", data.time);
-            append({
-                name: "Local Party",
-                content: content,
-                pfp: "#f3dfbf"
-            });
-        }
+        // Log the action in chat
+        const content = time(data.action === 'seek' ? "seeked" : data.action, 
+                           data.username || "Someone", 
+                           data.time);
+        append({
+            name: "Local Party",
+            content: content,
+            pfp: "#f3dfbf"
+        });
+
     } catch (e) {
         console.error('Error handling video control:', e);
     }
