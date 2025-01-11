@@ -238,13 +238,62 @@ function setupConnection(conn) {
     connections[conn.peer] = conn;
     let metadataInitialized = false;
     let mediaSourceReady = false;
+    let duration = 0;
+    let bytesPerSecond = 0;
     
     // Reset state variables on new connection
     pendingChunks = [];
     receivedSize = 0;
+    expectedSize = 0;
     
     const videoElement = document.querySelector('#video-player_html5_api');
-    
+
+    // Helper function to request missing chunks
+    const requestMissingChunks = (startTime, endTime) => {
+        if (!isHost) {
+            console.log(`Requesting chunks for time range: ${startTime} to ${endTime}`);
+            conn.send({
+                type: 'chunk-request',
+                startTime: startTime,
+                endTime: endTime
+            });
+        }
+    };
+
+    // Helper function to set up buffer monitoring
+    const setupBufferMonitoring = () => {
+        if (!player || !sourceBuffer) return;
+
+        player.on('waiting', () => {
+            if (sourceBuffer.buffered.length > 0) {
+                const currentTime = player.currentTime();
+                let hasValidRange = false;
+
+                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                    const start = sourceBuffer.buffered.start(i);
+                    const end = sourceBuffer.buffered.end(i);
+                    
+                    if (currentTime >= start && currentTime <= end) {
+                        hasValidRange = true;
+                        break;
+                    }
+                }
+
+                if (!hasValidRange) {
+                    // Find the closest buffered range and request missing chunks
+                    let closestEnd = 0;
+                    for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                        const end = sourceBuffer.buffered.end(i);
+                        if (end < currentTime && end > closestEnd) {
+                            closestEnd = end;
+                        }
+                    }
+                    requestMissingChunks(closestEnd, currentTime + 10);
+                }
+            }
+        });
+    };
+
     conn.on('data', async (data) => {
         console.log('Received data type:', data.type, data);
         
@@ -253,7 +302,8 @@ function setupConnection(conn) {
                 case 'video-metadata':
                     console.log('Processing metadata:', data);
                     expectedSize = data.size;
-                    console.log(`Expected size set to: ${expectedSize} bytes`);
+                    duration = data.duration;
+                    bytesPerSecond = data.size / data.duration;
                     
                     // Reset previous MediaSource
                     if (mediaSource) {
@@ -264,100 +314,91 @@ function setupConnection(conn) {
                         sourceBuffer = null;
                     }
 
-                    // Create new MediaSource
                     mediaSource = new MediaSource();
-                    console.log('Created new MediaSource');
-                    
                     videoElement.src = URL.createObjectURL(mediaSource);
-                    console.log('Set video element source');
                     
                     mediaSource.addEventListener('sourceopen', () => {
                         try {
-                            console.log('MediaSource opened, state:', mediaSource.readyState);
-                            
                             let mimeType = data.mimeType;
                             if (data.mimeType === 'video/webm') {
                                 mimeType = 'video/webm;codecs="vp8,vorbis"';
                             }
                             
-                            console.log('Creating source buffer with MIME type:', mimeType);
                             sourceBuffer = mediaSource.addSourceBuffer(mimeType);
                             sourceBuffer.mode = 'sequence';
-                            sourceBuffer.timestampOffset = 0;  
-                            console.log('Source buffer created and mode set to segments');
+                            sourceBuffer.timestampOffset = 0;
                             
-                            sourceBuffer.addEventListener('updateend', () => {
+                            sourceBuffer.addEventListener('updateend', async () => {
                                 if (!mediaSourceReady) {
                                     mediaSourceReady = true;
                                     console.log('MediaSource ready for chunks');
+                                    setupBufferMonitoring();
                                 }
                                 
                                 // Process next chunk if available
                                 if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                                    const nextChunk = pendingChunks.shift();
+                                    const nextChunk = pendingChunks[0];
                                     try {
-                                        sourceBuffer.appendBuffer(nextChunk);
-                                        
-                                        // Log buffer status after append
+                                        sourceBuffer.appendBuffer(nextChunk.data);
+                                        pendingChunks.shift();
+
+                                        // Enable playback if we have enough buffer
                                         if (sourceBuffer.buffered.length > 0) {
-                                            const start = sourceBuffer.buffered.start(0);
-                                            const end = sourceBuffer.buffered.end(0);
-                                            console.log(`Buffer status: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
+                                            const bufferedEnd = sourceBuffer.buffered.end(0);
+                                            if (bufferedEnd > 3 && player.paused()) {
+                                                player.controlBar.playToggle.enable();
+                                            }
                                         }
                                     } catch (e) {
-                                        console.error('Error appending buffer:', e);
                                         if (e.name === 'QuotaExceededError') {
-                                            if (sourceBuffer.buffered.length > 0) {
-                                                const start = sourceBuffer.buffered.start(0);
-                                                const currentTime = player.currentTime();
-                                                sourceBuffer.remove(start, Math.max(start, currentTime - 10));
-                                                pendingChunks.unshift(nextChunk);
-                                            }
+                                            await handleQuotaExceeded();
                                         }
-                                    }
-                                } else if (receivedSize >= expectedSize && pendingChunks.length === 0) {
-                                    if (sourceBuffer.buffered.length > 0) {
-                                        const buffered = sourceBuffer.buffered;
-                                        const duration = buffered.end(buffered.length - 1);
-                                        console.log(`Video fully processed. Duration: ${duration}s`);
-                                        
-                                        setTimeout(() => {
-                                            if (mediaSource && mediaSource.readyState === 'open') {
-                                                mediaSource.endOfStream();
-                                            }
-                                        }, 1000);
-                                        
-                                        // Setup video control events after video is loaded
-                                        setupVideoControls();
                                     }
                                 }
                             });
 
                             metadataInitialized = true;
-                            console.log('Metadata initialized, ready for chunks');
                         } catch (e) {
                             console.error('Error in sourceopen:', e);
                         }
                     });
                     break;
                     
+                case 'chunk-request':
+                    if (isHost && videoFile) {
+                        const startByte = Math.floor(data.startTime * bytesPerSecond);
+                        const endByte = Math.min(Math.floor(data.endTime * bytesPerSecond), videoFile.size);
+                        
+                        const chunk = videoFile.slice(startByte, endByte);
+                        const buffer = await chunk.arrayBuffer();
+                        
+                        conn.send({
+                            type: 'video-chunk',
+                            data: buffer,
+                            timeRange: {
+                                start: data.startTime,
+                                end: data.endTime
+                            }
+                        });
+                    }
+                    break;
+
                 case 'video-chunk':
                     const chunk = new Uint8Array(data.data);
-                    pendingChunks.push(chunk);
+                    pendingChunks.push({
+                        data: chunk,
+                        timeRange: data.timeRange
+                    });
                     receivedSize += chunk.byteLength;
-                    
-                    console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
-                    console.log(`Pending chunks: ${pendingChunks.length}, Current chunk size: ${chunk.byteLength}`);
                     
                     if (metadataInitialized && mediaSourceReady && !sourceBuffer.updating) {
                         const nextChunk = pendingChunks.shift();
-                        sourceBuffer.appendBuffer(nextChunk);
+                        sourceBuffer.appendBuffer(nextChunk.data);
                     }
                     break;
-                    
+
                 case 'video-complete':
                     console.log('Video transfer complete');
-                    console.log(`Total pending chunks: ${pendingChunks.length}, Total received: ${receivedSize}/${expectedSize}`);
                     break;
 
                 case 'video-request':
@@ -371,47 +412,52 @@ function setupConnection(conn) {
                     handleChatMessage(data);
                     break;
 
-case 'control':
-    console.log('Received control command:', data);
-    if (player) {
-        try {
-            const currentTime = player.currentTime();
-            
-            switch(data.action) {
-                case 'play':
-                    console.log('Remote play command received');
-                    // Only sync time if the difference is really large
-                    if (Math.abs(currentTime - data.time) > 3) {
-                        player.currentTime(data.time);
+                case 'control':
+                    if (!player || !allowEmit) return;
+                    
+                    try {
+                        const currentTime = player.currentTime();
+                        allowEmit = false;
+
+                        switch(data.action) {
+                            case 'play':
+                                if (player.paused()) {
+                                    if (Math.abs(currentTime - data.time) > 3) {
+                                        player.currentTime(data.time);
+                                        // Request chunks if needed
+                                        requestMissingChunks(data.time, data.time + 10);
+                                    }
+                                    player.play();
+                                }
+                                break;
+                                
+                            case 'pause':
+                                if (!player.paused()) {
+                                    player.pause();
+                                }
+                                break;
+                                
+                            case 'seek':
+                                if (Math.abs(currentTime - data.time) > 0.5) {
+                                    player.currentTime(data.time);
+                                    // Request chunks for new position
+                                    requestMissingChunks(data.time, data.time + 10);
+                                }
+                                break;
+                        }
+
+                        append({
+                            name: "Local Party",
+                            content: time(data.action, data.username || "Someone", data.time),
+                            pfp: "#f3dfbf"
+                        });
+
+                    } catch (e) {
+                        console.error('Error handling video control:', e);
+                    } finally {
+                        setTimeout(() => { allowEmit = true; }, data.action === 'seek' ? 1000 : 500);
                     }
-                    player.play();
                     break;
-                    
-                case 'pause':
-                    console.log('Remote pause command received');
-                    player.pause();
-                    // Don't sync time on pause to avoid stuttering
-                    break;
-                    
-                case 'seek':
-                    console.log(`Remote seek command received: ${data.time}`);
-                    // For seeks, we do want to sync position
-                    player.currentTime(data.time);
-                    break;
-            }
-            
-            // Log the action in chat
-            const content = time(data.action, data.username || "Someone", data.time);
-            append({
-                name: "Local Party",
-                content: content,
-                pfp: "#f3dfbf"
-            });
-        } catch (e) {
-            console.error('Error handling video control:', e);
-        }
-    }
-    break;
             }
         } catch (error) {
             console.error('Error processing data:', error);
@@ -420,6 +466,7 @@ case 'control':
         }
     });
 
+    // Rest of connection setup...
     conn.on('open', () => {
         console.log('Connection opened to peer:', conn.peer);
         if (!isHost) {
@@ -434,6 +481,7 @@ case 'control':
     conn.on('error', (err) => {
         handleConnectionError(conn, err);
     });
+}
 
     // Helper function to set up video control events
     function setupVideoControls() {
@@ -484,7 +532,7 @@ case 'control':
             setTimeout(() => { allowEmit = true; }, 500);
         });
     }
-}
+
 
 let isProcessingChunks = false;
 async function processAllChunks() {
@@ -1160,25 +1208,24 @@ function handleVideoMetadata(data) {
 // Process next chunk in queue
 // Improved chunk processing function with better buffer management
 async function processNextChunk() {
-    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0) {
-        return;
-    }
+    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0) return;
 
+    const chunk = pendingChunks[0];
     try {
-        const chunk = pendingChunks.shift();
-        sourceBuffer.appendBuffer(chunk);
+        await appendChunkWithRetry(chunk.data);
+        pendingChunks.shift();
+
+        // Check if we can start playback
+        if (sourceBuffer.buffered.length > 0) {
+            const bufferedEnd = sourceBuffer.buffered.end(0);
+            if (bufferedEnd > 3 && player.paused()) { // Start once we have 3 seconds
+                player.play().catch(e => console.error('Auto-play failed:', e));
+            }
+        }
     } catch (e) {
+        console.error('Error processing chunk:', e);
         if (e.name === 'QuotaExceededError') {
-            // Clean up old data before retrying
-            const currentTime = player.currentTime();
-            await new Promise(resolve => {
-                removeOldBufferData(currentTime);
-                sourceBuffer.addEventListener('updateend', resolve, { once: true });
-            });
-            // Put chunk back at front of queue
-            pendingChunks.unshift(chunk);
-        } else {
-            console.error('Error appending buffer:', e);
+            await handleQuotaExceeded();
         }
     }
 }
