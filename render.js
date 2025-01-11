@@ -119,6 +119,10 @@ function setupConnection(conn) {
     let metadataInitialized = false;
     let mediaSourceReady = false;
     
+    // Reset state variables on new connection
+    pendingChunks = [];
+    receivedSize = 0;
+    
     conn.on('data', async (data) => {
         console.log('Received data type:', data.type);
         
@@ -126,13 +130,36 @@ function setupConnection(conn) {
             switch (data.type) {
                 case 'video-metadata':
                     console.log('Processing metadata:', data);
+                    
+                    // Reset previous MediaSource if it exists
+                    if (mediaSource) {
+                        if (mediaSource.readyState === 'open') {
+                            mediaSource.endOfStream();
+                        }
+                        mediaSource = null;
+                        sourceBuffer = null;
+                    }
+
                     mediaSource = new MediaSource();
                     const url = URL.createObjectURL(mediaSource);
                     
                     mediaSource.addEventListener('sourceopen', () => {
                         try {
-                            console.log('MediaSource opened');
-                            sourceBuffer = mediaSource.addSourceBuffer(data.type || 'video/webm');
+                            console.log('MediaSource opened, state:', mediaSource.readyState);
+                            
+                            // Use the MIME type from metadata
+                            console.log('Creating source buffer with MIME type:', data.mimeType);
+                            
+                            // First try with the provided MIME type
+                            try {
+                                sourceBuffer = mediaSource.addSourceBuffer(data.mimeType);
+                            } catch (e) {
+                                console.warn('Failed to create source buffer with full MIME type, trying base type');
+                                // If that fails, try with just the base MIME type
+                                const baseType = data.mimeType.split(';')[0];
+                                sourceBuffer = mediaSource.addSourceBuffer(baseType);
+                            }
+                            
                             sourceBuffer.mode = 'sequence';
                             
                             sourceBuffer.addEventListener('updateend', () => {
@@ -142,10 +169,15 @@ function setupConnection(conn) {
                                 }
                                 processNextChunk();
                             });
-                            
+
+                            sourceBuffer.addEventListener('error', (e) => {
+                                console.error('SourceBuffer error:', e);
+                            });
+
+                            // Set player source after buffer is ready
                             player.src({
                                 src: url,
-                                type: data.type || 'video/webm'
+                                type: data.mimeType
                             });
                             
                             metadataInitialized = true;
@@ -158,7 +190,13 @@ function setupConnection(conn) {
                             }
                         } catch (e) {
                             console.error('Error in sourceopen:', e);
+                            notyf.error("Error setting up video: " + e.message);
                         }
+                    });
+
+                    // Handle MediaSource errors
+                    mediaSource.addEventListener('error', (e) => {
+                        console.error('MediaSource error:', e);
                     });
                     break;
                     
@@ -169,6 +207,7 @@ function setupConnection(conn) {
                     } else {
                         const chunk = new Uint8Array(data.data);
                         pendingChunks.push(chunk);
+                        console.log(`Received chunk, size: ${chunk.length}, total queued: ${pendingChunks.length}`);
                         if (mediaSourceReady && !sourceBuffer.updating) {
                             processNextChunk();
                         }
@@ -176,11 +215,15 @@ function setupConnection(conn) {
                     break;
                     
                 case 'video-complete':
-                    console.log('Video transfer complete');
+                    console.log('Video transfer complete. Total chunks received:', pendingChunks.length);
+                    if (metadataInitialized && mediaSourceReady) {
+                        processNextChunk();
+                    }
                     break;
                     
                 case 'video-request':
                     if (isHost && videoFile) {
+                        console.log('Received video request, starting stream');
                         startStreamingTo(conn);
                     }
                     break;
@@ -194,6 +237,10 @@ function setupConnection(conn) {
                     break;
                     
                 case 'control':
+                    if (!player || !mediaSourceReady) {
+                        console.log('Ignoring control command - player not ready');
+                        return;
+                    }
                     handleVideoControl(data);
                     break;
             }
@@ -204,12 +251,15 @@ function setupConnection(conn) {
     });
     
     conn.on('open', () => {
+        console.log('Connection opened to peer:', conn.peer);
         if (!isHost) {
+            console.log('Sending video request to host');
             conn.send({ type: 'video-request' });
         }
     });
 
     conn.on('close', () => {
+        console.log('Connection closed to peer:', conn.peer);
         delete connections[conn.peer];
         append({
             name: 'Local Party',
@@ -219,34 +269,80 @@ function setupConnection(conn) {
     });
 
     conn.on('error', (err) => {
-        console.error('Connection error:', err);
+        console.error('Connection error with peer:', conn.peer, err);
         notyf.error("Connection error occurred");
     });
 }
 
 
-// Start streaming video to peer
+// Helper function to get proper MIME type and codecs
+function getVideoMimeType(file) {
+    // Start with the file's type
+    let mimeType = file.type;
+    
+    // If file.type is empty or generic "video", try to detect from extension
+    if (!mimeType || mimeType === 'video' || mimeType === 'video/') {
+        const ext = file.name.split('.').pop().toLowerCase();
+        switch (ext) {
+            case 'mp4':
+                mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+                break;
+            case 'webm':
+                mimeType = 'video/webm; codecs="vp8, vorbis"';
+                break;
+            case 'ogg':
+                mimeType = 'video/ogg; codecs="theora, vorbis"';
+                break;
+            case 'mov':
+                mimeType = 'video/quicktime';
+                break;
+            case 'mkv':
+                mimeType = 'video/x-matroska';
+                break;
+            case 'avi':
+                mimeType = 'video/x-msvideo';
+                break;
+            case '3gp':
+                mimeType = 'video/3gpp';
+                break;
+            default:
+                // Default to MP4 if we can't detect
+                mimeType = 'video/mp4';
+        }
+    }
+    
+    console.log('Detected MIME type:', mimeType, 'for file:', file.name);
+    return mimeType;
+}
+
+// Update startStreamingTo to use proper MIME type
 async function startStreamingTo(conn) {
     try {
         if (!videoFile) {
             throw new Error('No video file available');
         }
 
-        // Send metadata first and wait for acknowledgment
+        console.log('Starting video stream with file:', videoFile);
+
+        // Get proper MIME type from file
+        const mimeType = getVideoMimeType(videoFile);
+
+        // Send metadata with proper MIME type
         const metadata = {
             type: 'video-metadata',
             name: videoFile.name,
             size: videoFile.size,
-            type: videoFile.type || 'video/webm',
+            mimeType: mimeType,
             lastModified: videoFile.lastModified
         };
         
+        console.log('Sending metadata:', metadata);
         conn.send(metadata);
-        
-        // Wait a brief moment for metadata to be processed
-        await new Promise(resolve => setTimeout(resolve, 500));
 
-        // Start streaming chunks
+        // Add delay to ensure metadata is processed
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Stream chunks
         let offset = 0;
         while (offset < videoFile.size) {
             const chunk = videoFile.slice(offset, offset + CHUNK_SIZE);
@@ -263,17 +359,14 @@ async function startStreamingTo(conn) {
             await new Promise(resolve => setTimeout(resolve, 50));
         }
         
-        // Send end-of-stream signal
-        conn.send({
-            type: 'video-complete'
-        });
-        
+        conn.send({ type: 'video-complete' });
         notyf.success("Video sent to peer");
     } catch (err) {
         console.error('Error streaming video:', err);
         notyf.error("Error streaming video: " + err.message);
     }
 }
+
 
 // Handle incoming video metadata
 function handleVideoMetadata(data) {
@@ -333,22 +426,29 @@ function handleVideoMetadata(data) {
 // Process next chunk in queue
 function processNextChunk() {
     if (!sourceBuffer || !mediaSource || sourceBuffer.updating || pendingChunks.length === 0) {
+        console.log('Skipping chunk processing:', {
+            hasSourceBuffer: !!sourceBuffer,
+            hasMediaSource: !!mediaSource,
+            isUpdating: sourceBuffer?.updating,
+            queueLength: pendingChunks.length
+        });
         return;
     }
 
     try {
         const chunk = pendingChunks.shift();
+        console.log(`Processing chunk of size ${chunk.byteLength}`);
+        
         sourceBuffer.appendBuffer(chunk);
         
-        // Enable play button after some data is buffered
         if (sourceBuffer.buffered.length > 0) {
             const bufferedEnd = sourceBuffer.buffered.end(0);
             const bufferedStart = sourceBuffer.buffered.start(0);
             const bufferedDuration = bufferedEnd - bufferedStart;
+            console.log(`Buffer status: ${bufferedDuration.toFixed(2)}s buffered`);
             
-            console.log(`Buffered duration: ${bufferedDuration}s`);
-            
-            if (bufferedDuration >= 0.5 && player.paused()) {
+            // Enable play if we have enough buffer
+            if (bufferedDuration >= 0.5) {
                 console.log('Enabling play button');
                 player.controlBar.playToggle.enable();
             }
@@ -364,7 +464,6 @@ function processNextChunk() {
         }
     }
 }
-
 // Handle incoming video chunk
 function handleVideoChunk(data) {
     const chunk = new Uint8Array(data.data);
