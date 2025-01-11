@@ -358,23 +358,41 @@ async function setupMediaSource(videoElement, mimeType) {
             mediaState.mediaSourceUrl = URL.createObjectURL(mediaSource);
             console.log('Created new MediaSource');
 
-            mediaSource.addEventListener('sourceopen', async () => {
+            let setupComplete = false;
+
+            const handleSourceOpen = async () => {
+                // Prevent multiple executions
+                if (setupComplete) return;
+                setupComplete = true;
+
+                // Remove the event listener immediately
+                mediaSource.removeEventListener('sourceopen', handleSourceOpen);
+
                 try {
                     console.log('MediaSource opened');
                     
-                    // Set up SourceBuffer
-                    const finalMimeType = mimeType === 'video/webm' ? 
-                        'video/webm;codecs="vp8,vorbis"' : mimeType;
+                    // Set up SourceBuffer only if it doesn't exist
+                    if (!sourceBuffer) {
+                        const finalMimeType = mimeType === 'video/webm' ? 
+                            'video/webm;codecs="vp8,vorbis"' : mimeType;
 
-                    sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
-                    sourceBuffer.mode = 'segments';
-                    console.log('SourceBuffer created');
+                        sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
+                        sourceBuffer.mode = 'segments';
+                        console.log('SourceBuffer created');
 
-                    // Set up video source
-                    if (player) {
+                        // Add updateend listener only once
+                        sourceBuffer.addEventListener('updateend', () => {
+                            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                                processNextChunk();
+                            }
+                        });
+                    }
+
+                    // Update player source only if needed
+                    if (player && player.currentSrc() !== mediaState.mediaSourceUrl) {
                         player.src({
                             src: mediaState.mediaSourceUrl,
-                            type: finalMimeType
+                            type: mimeType
                         });
                     }
 
@@ -382,14 +400,20 @@ async function setupMediaSource(videoElement, mimeType) {
                     resolve();
                 } catch (error) {
                     console.error('Error in sourceopen:', error);
+                    mediaState.hasError = true;
                     reject(error);
                 }
-            });
+            };
 
+            // Add the sourceopen listener with once option
+            mediaSource.addEventListener('sourceopen', handleSourceOpen, { once: true });
+            
+            // Set video element source
             videoElement.src = mediaState.mediaSourceUrl;
 
         } catch (error) {
             console.error('Error in setupMediaSource:', error);
+            mediaState.hasError = true;
             reject(error);
         }
     });
@@ -633,18 +657,21 @@ async function processNextChunk() {
 }
 // Function to handle video metadata with proper initialization
 async function initializeMediaSource(videoElement, mimeType) {
+    if (mediaState.isInitializing) {
+        console.log('Already initializing media source');
+        return false;
+    }
+
+    mediaState.isInitializing = true;
+
     try {
-        await setupMediaSource(videoElement, mimeType);
-        
-        // Start processing any queued chunks
-        if (pendingChunks.length > 0) {
-            processNextChunk();
-        }
-        
-        return true;
+        const success = await setupMediaSource(videoElement, mimeType);
+        mediaState.isInitializing = false;
+        return success;
     } catch (error) {
         console.error('Failed to initialize media source:', error);
         mediaState.hasError = true;
+        mediaState.isInitializing = false;
         return false;
     }
 }
@@ -801,16 +828,19 @@ function handleVideoChunk(data) {
     const percentage = ((receivedSize / expectedSize) * 100).toFixed(1);
     console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${percentage}%)`);
 
-    // Process chunk immediately if possible
-    if (sourceBuffer && !sourceBuffer.updating) {
-        processNextChunk().catch(error => {
-            console.error('Error processing chunk:', error);
-        });
+    // Only process if we're ready and not already processing
+    if (mediaState.isReady && sourceBuffer && 
+        !sourceBuffer.updating && mediaSource.readyState === 'open') {
+        processNextChunk().catch(console.error);
     } else {
-        console.log('Queuing chunk for later processing');
+        console.log('Queuing chunk for later processing. State:', {
+            mediaReady: mediaState.isReady,
+            hasSourceBuffer: !!sourceBuffer,
+            isUpdating: sourceBuffer?.updating,
+            mediaSourceState: mediaSource?.readyState
+        });
     }
 }
-
 
 function initializePlayerControls() {
     if (!player) return;
