@@ -749,39 +749,45 @@ function processNextChunk() {
     try {
         const chunk = pendingChunks[0];
         
-        // Check if we need to clear some buffer
+        // Check current buffer status before appending
         if (sourceBuffer.buffered.length > 0) {
-            const currentTime = player.currentTime();
-            const bufferEnd = sourceBuffer.buffered.end(0);
-            
-            // If buffer is getting too full, remove some old data
-            if (bufferEnd - currentTime > 30) {  // If we have more than 30 seconds buffered
-                const start = sourceBuffer.buffered.start(0);
-                sourceBuffer.remove(start, currentTime - 10);  // Keep 10 seconds before current time
-                return;  // Wait for updateend event
-            }
+            const currentEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+            console.log(`Current buffer ends at: ${currentEnd}s`);
         }
         
-        console.log(`Processing chunk ${pendingChunks.length} remaining, ${receivedSize}/${expectedSize} bytes`);
+        // Append the chunk
         sourceBuffer.appendBuffer(chunk);
         pendingChunks.shift();
 
-        // Log buffer status
-        if (sourceBuffer.buffered.length > 0) {
-            const end = sourceBuffer.buffered.end(0);
-            const start = sourceBuffer.buffered.start(0);
-            console.log(`Current buffer: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
-        }
+        // After append, check if we need to normalize buffer
+        sourceBuffer.addEventListener('updateend', () => {
+            logBufferStatus();
+            
+            // If we have multiple ranges, try to merge them
+            if (sourceBuffer.buffered.length > 1) {
+                console.log("Multiple ranges detected, attempting to normalize...");
+                const start = sourceBuffer.buffered.start(0);
+                const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                
+                // Remove any gaps
+                for (let i = 0; i < sourceBuffer.buffered.length - 1; i++) {
+                    const gap = sourceBuffer.buffered.start(i + 1) - sourceBuffer.buffered.end(i);
+                    if (gap < 0.5) { // If gap is less than 0.5 seconds
+                        console.log(`Removing gap between ranges ${i} and ${i + 1}`);
+                        sourceBuffer.remove(sourceBuffer.buffered.end(i), sourceBuffer.buffered.start(i + 1));
+                    }
+                }
+            }
+        }, { once: true });
 
     } catch (e) {
         console.error('Error processing chunk:', e);
         if (e.name === 'QuotaExceededError') {
-            // Handle quota exceeded by removing old buffer
             if (sourceBuffer.buffered.length > 0) {
-                const start = sourceBuffer.buffered.start(0);
                 const currentTime = player.currentTime();
-                sourceBuffer.remove(start, currentTime - 10);
-                pendingChunks.unshift(chunk); // Put chunk back
+                const start = sourceBuffer.buffered.start(0);
+                sourceBuffer.remove(start, currentTime - 30); // Keep more buffer
+                pendingChunks.unshift(chunk);
             }
         }
     }
@@ -967,26 +973,44 @@ function setupBufferMonitoring() {
     if (!player) return;
 
     player.on('timeupdate', () => {
+        logBufferStatus();
+        
+        const currentTime = player.currentTime();
+        
+        // Check if we're approaching a gap
         if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-            const currentTime = player.currentTime();
-            const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-            const bufferAhead = bufferedEnd - currentTime;
+            let inBufferedRange = false;
+            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                const start = sourceBuffer.buffered.start(i);
+                const end = sourceBuffer.buffered.end(i);
+                
+                if (currentTime >= start && currentTime <= end) {
+                    inBufferedRange = true;
+                    // If we're getting close to the end of this range
+                    if (end - currentTime < 3) {
+                        console.log("Approaching end of buffer range, processing more chunks if available");
+                        if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                            processNextChunk();
+                        }
+                    }
+                    break;
+                }
+            }
             
-            console.log(`Buffer status: ${bufferAhead.toFixed(2)}s ahead, ` +
-                      `${pendingChunks.length} chunks remaining`);
-            
-            // If we're running low on buffer and have chunks, process them
-            if (bufferAhead < 10 && pendingChunks.length > 0) {
-                processAllChunks();
+            if (!inBufferedRange) {
+                console.log("Playhead outside buffered ranges!");
+                // Try to load the appropriate segment
+                if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                    processNextChunk();
+                }
             }
         }
     });
 
-    player.on('waiting', () => {
-        console.log('Video waiting for data');
-        if (pendingChunks.length > 0) {
-            processAllChunks();
-        }
+    // Add seeking listener
+    player.on('seeking', () => {
+        console.log("Seek detected");
+        logBufferStatus();
     });
 }
 // Add a buffer check function
@@ -1418,6 +1442,33 @@ function setupBufferMonitoring() {
             }
         }
     });
+}
+
+function logBufferStatus() {
+    if (!sourceBuffer || !player) return;
+    
+    const videoElement = player.tech().el();
+    console.log("--- Buffer Status Check ---");
+    
+    // Log SourceBuffer ranges
+    if (sourceBuffer.buffered.length > 0) {
+        console.log("SourceBuffer ranges:");
+        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+            const start = sourceBuffer.buffered.start(i);
+            const end = sourceBuffer.buffered.end(i);
+            console.log(`Range ${i}: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
+        }
+    }
+    
+    // Log Video Element ranges
+    if (videoElement.buffered.length > 0) {
+        console.log("Video Element ranges:");
+        for (let i = 0; i < videoElement.buffered.length; i++) {
+            const start = videoElement.buffered.start(i);
+            const end = videoElement.buffered.end(i);
+            console.log(`Range ${i}: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
+        }
+    }
 }
 // Set up room code click-to-copy
 document.getElementById('roomCodeText').addEventListener('click', () => {
