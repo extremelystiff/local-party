@@ -467,33 +467,37 @@ async function processChunkBatch() {
     }
 
     try {
-        // Process up to 3 chunks at a time
-        const batch = pendingChunks.splice(0, 3);
-        if (batch.length === 0) return;
+        // Process all chunks in sequence to avoid gaps
+        while (pendingChunks.length > 0 && !sourceBuffer.updating) {
+            const chunk = pendingChunks.shift();
+            console.log(`Processing chunk of size ${chunk.byteLength}`);
+            
+            // Log buffer ranges before append
+            if (sourceBuffer.buffered.length > 0) {
+                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                    console.log(`Before append - Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                }
+            }
 
-        console.log(`Processing batch of ${batch.length} chunks`);
-        const totalLength = batch.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-        const combinedChunk = new Uint8Array(totalLength);
-        
-        let offset = 0;
-        for (const chunk of batch) {
-            combinedChunk.set(chunk, offset);
-            offset += chunk.byteLength;
+            sourceBuffer.appendBuffer(chunk);
+
+            // Wait for chunk to be processed
+            await new Promise((resolve, reject) => {
+                sourceBuffer.addEventListener('updateend', () => {
+                    // Log buffer ranges after append
+                    if (sourceBuffer.buffered.length > 0) {
+                        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                            console.log(`After append - Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                        }
+                    }
+                    resolve();
+                }, { once: true });
+                
+                sourceBuffer.addEventListener('error', reject, { once: true });
+            });
         }
 
-        console.log(`Appending ${totalLength} bytes to source buffer`);
-        sourceBuffer.appendBuffer(combinedChunk);
-
-        // Schedule next batch
-        sourceBuffer.addEventListener('updateend', () => {
-            console.log('Batch processed successfully');
-            if (pendingChunks.length > 0) {
-                console.log(`${pendingChunks.length} chunks remaining`);
-                setTimeout(() => processChunkBatch(), 10);
-            } else {
-                console.log('All chunks processed');
-            }
-        }, { once: true });
+        console.log('All chunks processed');
 
     } catch (e) {
         console.error('Error in processChunkBatch:', e);
@@ -505,13 +509,12 @@ async function processChunkBatch() {
                 const removeEnd = Math.max(start, currentTime - 10);
                 
                 sourceBuffer.remove(start, removeEnd);
-                // Put chunks back at the start of pending
-                pendingChunks.unshift(...batch);
+                // Put chunk back at the start of pending
+                pendingChunks.unshift(chunk);
             }
         }
     }
 }
-
 function setupSourceBuffer(mimeType) {
     if (!mediaSource || mediaSource.readyState !== 'open') {
         return;
@@ -524,28 +527,23 @@ function setupSourceBuffer(mimeType) {
         }
         
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        sourceBuffer.mode = 'segments'; // Use sequence mode for better timestamp handling
+        sourceBuffer.mode = 'sequence'; // Change to sequence mode for continuous appending
+        console.log('Source buffer created in sequence mode');
         
         // Handle source buffer updates
         sourceBuffer.addEventListener('updateend', () => {
-            // Check if we need to process more segments
-            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                processNextSegment();
-            }
-        });
-
-        // Monitor buffered ranges
-        setInterval(() => {
+            // Log current buffer ranges
             if (sourceBuffer.buffered.length > 0) {
-                const currentTime = player.currentTime();
-                const bufferedEnd = sourceBuffer.buffered.end(0);
-                
-                // If buffer is getting low, try to process more segments
-                if (bufferedEnd - currentTime < 5 && pendingChunks.length > 0) {
-                    processNextSegment();
+                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                    console.log(`Current buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
                 }
             }
-        }, 1000);
+            
+            // Check if we need to process more segments
+            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                processChunkBatch();
+            }
+        });
 
         mediaState.isReady = true;
     } catch (e) {
