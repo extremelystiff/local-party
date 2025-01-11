@@ -186,7 +186,7 @@ mediaSource.addEventListener('sourceopen', () => {
         console.error('Error in sourceopen:', error);
         mediaState.hasError = true;
     }
-});
+
     
     // Process next chunk if available
     if (pendingChunks.length > 0 && !sourceBuffer.updating) {
