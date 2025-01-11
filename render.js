@@ -389,11 +389,13 @@ function setupConnection(conn) {
 
                 case 'video-chunk':
                     const chunk = new Uint8Array(data.data);
-                    // Add to mediaQueue instead of pendingChunks
+                    console.log(`Processing chunk of size ${chunk.byteLength}`); // Debug log
+                
+                    // Add directly to mediaQueue
                     await mediaQueue.addChunk(chunk);
                     receivedSize += chunk.byteLength;
                     
-                    console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
+                    console.log(`Total received: ${receivedSize}/${expectedSize} bytes (${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
                     break;
 
                 case 'video-complete':
@@ -710,7 +712,13 @@ async function processChunkBatch() {
     
     for (const chunk of pendingChunks) {
         if (chunk instanceof Uint8Array) {
+            console.log(`Adding chunk of size ${chunk.byteLength} to queue`);
             await mediaQueue.addChunk(chunk);
+        } else if (chunk && chunk.data) {
+            // Handle case where chunk might be wrapped
+            const actualChunk = new Uint8Array(chunk.data);
+            console.log(`Adding unwrapped chunk of size ${actualChunk.byteLength} to queue`);
+            await mediaQueue.addChunk(actualChunk);
         } else {
             console.error('Invalid chunk format:', chunk);
         }
