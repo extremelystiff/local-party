@@ -123,6 +123,9 @@ function setupConnection(conn) {
     pendingChunks = [];
     receivedSize = 0;
     
+    // Create video element directly instead of using blob URL
+    const videoElement = document.querySelector('#video-player_html5_api');
+    
     conn.on('data', async (data) => {
         console.log('Received data type:', data.type);
         
@@ -144,30 +147,27 @@ function setupConnection(conn) {
                     mediaSource = new MediaSource();
                     console.log('Created new MediaSource');
 
-                    // Create the URL BEFORE adding event listener
-                    const url = URL.createObjectURL(mediaSource);
-                    console.log('Created MediaSource URL:', url);
-
-                    // First set up the source in the player
-                    player.src({
-                        src: url,
-                        type: data.mimeType
-                    });
-                    console.log('Set player source');
+                    // Directly set the MediaSource as the video source
+                    videoElement.src = URL.createObjectURL(mediaSource);
+                    console.log('Set video element source directly');
                     
                     // Then handle the sourceopen event
                     mediaSource.addEventListener('sourceopen', () => {
                         try {
                             console.log('MediaSource opened, state:', mediaSource.readyState);
                             
-                            console.log('Creating source buffer with MIME type:', data.mimeType);
+                            // For WebM, specify the codecs explicitly
+                            let mimeType = data.mimeType;
+                            if (data.mimeType === 'video/webm') {
+                                mimeType = 'video/webm;codecs="vp8,vorbis"';
+                            }
                             
-                            // First try with the provided MIME type
+                            console.log('Creating source buffer with MIME type:', mimeType);
+                            
                             try {
-                                sourceBuffer = mediaSource.addSourceBuffer(data.mimeType);
+                                sourceBuffer = mediaSource.addSourceBuffer(mimeType);
                             } catch (e) {
                                 console.warn('Failed to create source buffer with full MIME type, trying base type');
-                                // If that fails, try with just the base MIME type
                                 const baseType = data.mimeType.split(';')[0];
                                 sourceBuffer = mediaSource.addSourceBuffer(baseType);
                             }
@@ -211,7 +211,6 @@ function setupConnection(conn) {
                         console.log('MediaSource closed');
                     });
 
-                    // Handle MediaSource errors
                     mediaSource.addEventListener('error', (e) => {
                         console.error('MediaSource error:', e);
                     });
@@ -290,7 +289,6 @@ function setupConnection(conn) {
         notyf.error("Connection error occurred");
     });
 }
-
 
 // Helper function to get proper MIME type and codecs
 function getVideoMimeType(file) {
