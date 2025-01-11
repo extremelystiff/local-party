@@ -218,12 +218,12 @@ function handleVideoMetadata(data) {
     receivedChunks = [];
     receivedSize = 0;
     
-    // Clear any existing video
-    if (videoPlayer.src) {
-        URL.revokeObjectURL(videoPlayer.src);
-        videoPlayer.src = '';
+    // Clean up any existing video sources
+    if (player) {
+        player.pause();
+        player.src('');
+        player.load();
     }
-    videoFile = null;
     
     console.log('Preparing to receive video:', {
         expectedSize,
@@ -262,32 +262,57 @@ function handleVideoChunk(data) {
                 type: blob.type,
                 expectedSize: expectedSize
             });
-            
+
             // Create object URL
             const url = URL.createObjectURL(blob);
             
-            // Update Video.js source
-            player.src({
-                src: url,
-                type: videoType
+            // Dispose of the current player and reinitialize
+            if (player) {
+                player.dispose();
+            }
+            
+            // Reinitialize video.js player
+            player = videojs('video-player', {
+                controls: true,
+                preload: 'auto',
+                fluid: true,
+                html5: {
+                    vhs: {
+                        overrideNative: true
+                    },
+                    nativeVideoTracks: false,
+                    nativeAudioTracks: false,
+                    nativeTextTracks: false
+                },
+                sources: [{
+                    src: url,
+                    type: videoType
+                }]
             });
             
             player.ready(() => {
+                console.log('Video.js player ready with new source');
                 player.load();
-                console.log('Video.js player loaded new source');
-                notyf.success("Video ready to play");
+                player.play().catch(e => {
+                    console.error('Error playing video:', e);
+                });
                 
-                player.one('loadedmetadata', () => {
+                player.on('loadedmetadata', () => {
                     console.log('Video metadata loaded:', {
                         duration: player.duration(),
                         videoWidth: player.videoWidth(),
                         videoHeight: player.videoHeight()
                     });
                 });
+                
+                player.on('error', (e) => {
+                    console.error('Video.js error:', player.error());
+                });
             });
             
             receivedChunks = [];
             receivedSize = 0;
+            notyf.success("Video ready to play");
         }
     } catch (error) {
         console.error('Error handling video chunk:', error);
