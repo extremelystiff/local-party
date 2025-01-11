@@ -856,9 +856,10 @@ function initializePlayerEvents() {
         console.log('Local pause event triggered');
         broadcastVideoControl('pause');
     });
-
     player.on('seeking', () => {
+        if (!allowEmit) return;
         console.log('Local seek event triggered');
+        
         broadcastVideoControl('seek');
     });
 }
@@ -872,6 +873,9 @@ function handleChatMessage(data) {
 }
 
 function broadcastVideoControl(action) {
+    if (!allowEmit) return;  // Add this check
+    
+    allowEmit = false;
     const currentTime = player.currentTime();
     console.log(`Broadcasting ${action} control at time ${currentTime}`);
     
@@ -882,7 +886,6 @@ function broadcastVideoControl(action) {
         username: localStorage.getItem("username")
     };
     
-    // Log what we're sending
     console.log('Sending control data:', controlData);
     
     // Send to all connected peers
@@ -891,6 +894,9 @@ function broadcastVideoControl(action) {
             conn.send(controlData);
         }
     });
+
+    // Use longer timeout for seek events
+    setTimeout(() => { allowEmit = true; }, action === 'seek' ? 1000 : 500);
 }
 // Helper function to handle connection close
 function handleConnectionClose(conn) {
@@ -1458,18 +1464,20 @@ function initializePlayerControls() {
 }
 // Handle video controls
 function handleVideoControl(data) {
-    if (!player) return;
+    if (!player || !allowEmit) return;  // Add allowEmit check here
     
     try {
         console.log('Processing control event:', data);
         const currentTime = player.currentTime();
 
+        // Temporarily disable emit before making any changes
+        allowEmit = false;
+
         switch(data.action) {
             case 'play':
                 console.log('Handling play command');
                 if (player.paused()) {
-                    // First sync time if needed
-                    if (Math.abs(currentTime - data.time) > 0.5) {
+                    if (Math.abs(currentTime - data.time) > 3) {
                         console.log(`Syncing time before play: ${currentTime} -> ${data.time}`);
                         player.currentTime(data.time);
                     }
@@ -1481,16 +1489,11 @@ function handleVideoControl(data) {
                 console.log('Handling pause command');
                 if (!player.paused()) {
                     player.pause();
-                    // Sync time after pausing
-                    if (Math.abs(currentTime - data.time) > 0.5) {
-                        console.log(`Syncing time after pause: ${currentTime} -> ${data.time}`);
-                        player.currentTime(data.time);
-                    }
                 }
                 break;
                 
             case 'seek':
-                console.log('Handling seek command');
+                console.log(`Remote seek command received: ${data.time}`);
                 if (Math.abs(currentTime - data.time) > 0.5) {
                     console.log(`Seeking: ${currentTime} -> ${data.time}`);
                     player.currentTime(data.time);
@@ -1510,6 +1513,9 @@ function handleVideoControl(data) {
 
     } catch (e) {
         console.error('Error handling video control:', e);
+    } finally {
+        // Re-enable emit after a delay
+        setTimeout(() => { allowEmit = true; }, 1000);  // Increased delay for seek
     }
 }
 
