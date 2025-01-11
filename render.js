@@ -14,8 +14,12 @@ const roomPage = document.getElementById("room");
 const videoPlayer = document.getElementById("video-player");
 
 // Initialize PeerJS with random ID
-function initializePeer(isHost) {
+// At the start of the file, add this global variable
+let isHost = false;  // Global host status
+
+function initializePeer(asHost) {
     const peerId = randomString(5, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
+    isHost = asHost;  // Set global host status
     peer = new Peer(peerId);
     
     peer.on('open', (id) => {
@@ -23,7 +27,6 @@ function initializePeer(isHost) {
         if (isHost) {
             console.log('Initialized as host with video:', videoFile?.name);
             document.getElementById("roomCodeText").innerHTML = id;
-            localStorage.setItem("isHost", "true"); // Ensure host status is set
         }
     });
 
