@@ -51,7 +51,10 @@ function initializeApp() {
             });
             
             console.log('Video.js initialized');
-            
+            initializePlayerEvents(); 
+            console.log('Player Events initialized');
+            setupBufferMonitoring(); 
+            console.log('Buffer monitoring initialized');
             // Set up video player event handlers
             player.on('error', function(error) {
                 console.error('Video.js error:', player.error());
@@ -70,9 +73,7 @@ function initializeApp() {
             // Add play/pause event listeners
             player.on('play', videoControlsHandler);
             player.on('pause', videoControlsHandler);
-            // Set up buffer monitoring
-            setupBufferMonitoring();
-            console.log('Buffer monitoring initialized');
+
         }
 
         // Show landing page
@@ -240,27 +241,109 @@ function setupConnection(conn) {
 
 // Helper function to handle video chunk data
 function handleVideoChunkData(data, metadataInitialized, mediaSourceReady) {
-    const chunk = new Uint8Array(data.data);
-    
-    if (!metadataInitialized) {
-        console.log('Queuing chunk while waiting for metadata initialization');
+    try {
+        const chunk = new Uint8Array(data.data);
+        
+        // Always queue the chunk, even if metadata isn't ready
         pendingChunks.push(chunk);
-        return;
-    }
-    
-    pendingChunks.push(chunk);
-    console.log(`Received chunk, size: ${chunk.length}, total queued: ${pendingChunks.length}`);
-    
-    if (mediaSourceReady && !sourceBuffer.updating) {
-        processNextChunk();
+        console.log(`Received chunk, size: ${chunk.length}, total queued: ${pendingChunks.length}`);
+        
+        if (!metadataInitialized) {
+            console.log('Queuing chunk while waiting for metadata initialization');
+            return;
+        }
+        
+        if (mediaSourceReady && sourceBuffer && !sourceBuffer.updating) {
+            console.log('Processing chunk immediately');
+            processNextChunk();
+        }
+        
+        // Track progress
+        receivedSize += chunk.byteLength;
+        const percentage = Math.round((receivedSize / expectedSize) * 100);
+        console.log(`Received: ${receivedSize}/${expectedSize} bytes (${percentage}%)`);
+    } catch (error) {
+        console.error('Error handling video chunk:', error);
     }
 }
 
 // Helper function to handle video complete event
 function handleVideoComplete(metadataInitialized, mediaSourceReady) {
+    console.log('Video transfer complete. Checking state:', {
+        metadataInitialized,
+        mediaSourceReady,
+        pendingChunks: pendingChunks.length,
+        receivedSize,
+        expectedSize
+    });
+
     if (metadataInitialized && mediaSourceReady) {
+        // Process any remaining chunks
         processNextChunk();
+        
+        // Set up a check for completion
+        const checkComplete = setInterval(() => {
+            if (pendingChunks.length === 0 && !sourceBuffer.updating) {
+                clearInterval(checkComplete);
+                console.log('All chunks processed, ending stream');
+                
+                try {
+                    if (mediaSource && mediaSource.readyState === 'open') {
+                        mediaSource.endOfStream();
+                        notyf.success("Video fully loaded");
+                    }
+                } catch (e) {
+                    console.error('Error ending stream:', e);
+                }
+            }
+        }, 100);
     }
+}
+
+function initializePlayerEvents() {
+    if (!player) return;
+
+    // Handle video errors
+    player.on('error', function(error) {
+        console.error('Video.js error:', player.error());
+        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+            processNextChunk();
+        }
+    });
+
+    // Handle waiting events
+    player.on('waiting', function() {
+        console.log('Video waiting for data');
+        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+            processNextChunk();
+        }
+    });
+
+    // Handle playback events
+    player.on('canplay', () => {
+        console.log('Video can play');
+        player.controlBar.playToggle.enable();
+    });
+
+    player.on('playing', () => {
+        console.log('Video started playing');
+    });
+
+    // Monitor playback position
+    player.on('timeupdate', () => {
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
+            const bufferedEnd = sourceBuffer.buffered.end(0);
+            const bufferAhead = bufferedEnd - currentTime;
+            
+            console.log(`Playback position: ${currentTime.toFixed(2)}, Buffer ahead: ${bufferAhead.toFixed(2)}s`);
+            
+            // If buffer is running low, process more chunks
+            if (bufferAhead < 3 && pendingChunks.length > 0) {
+                processNextChunk();
+            }
+        }
+    });
 }
 
 // Helper function to handle chat messages
@@ -309,6 +392,88 @@ function handleConnectionError(conn, err) {
             conn.reconnect();
         }, 2000);
     }
+}
+
+// Function to set up MediaSource and SourceBuffer
+async function setupMediaSource(videoElement, mimeType) {
+    return new Promise((resolve, reject) => {
+        try {
+            // Cleanup any existing MediaSource
+            if (mediaSource) {
+                if (mediaSource.readyState === 'open') {
+                    try {
+                        mediaSource.endOfStream();
+                    } catch (e) {
+                        console.warn('Error closing previous MediaSource:', e);
+                    }
+                }
+                mediaSource = null;
+                sourceBuffer = null;
+            }
+
+            // Create new MediaSource
+            mediaSource = new MediaSource();
+            console.log('Created new MediaSource');
+
+            const handleSourceOpen = async () => {
+                try {
+                    console.log('MediaSource opened, state:', mediaSource.readyState);
+                    mediaSource.removeEventListener('sourceopen', handleSourceOpen);
+
+                    // For WebM, ensure we have proper codecs
+                    let finalMimeType = mimeType;
+                    if (mimeType === 'video/webm') {
+                        finalMimeType = 'video/webm;codecs="vp8,vorbis"';
+                    }
+
+                    console.log('Creating source buffer with MIME type:', finalMimeType);
+                    try {
+                        sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
+                    } catch (e) {
+                        console.warn('Failed to create source buffer with full MIME type, trying base type');
+                        const baseType = mimeType.split(';')[0];
+                        sourceBuffer = mediaSource.addSourceBuffer(baseType);
+                    }
+
+                    sourceBuffer.mode = 'sequence';
+                    console.log('Source buffer created and mode set to sequence');
+
+                    sourceBuffer.addEventListener('updateend', () => {
+                        if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                            processNextChunk();
+                        }
+                    });
+
+                    // Initialize state
+                    isFirstChunk = true;
+                    receivedChunks = [];
+                    pendingChunks = pendingChunks || [];
+                    receivedSize = 0;
+
+                    // Set up the video player
+                    if (player) {
+                        player.src({
+                            src: URL.createObjectURL(mediaSource),
+                            type: finalMimeType
+                        });
+                    }
+
+                    resolve();
+                } catch (e) {
+                    console.error('Error in sourceopen:', e);
+                    reject(e);
+                }
+            };
+
+            mediaSource.addEventListener('sourceopen', handleSourceOpen);
+            videoElement.src = URL.createObjectURL(mediaSource);
+            console.log('Set video element source');
+
+        } catch (e) {
+            console.error('Error setting up MediaSource:', e);
+            reject(e);
+        }
+    });
 }
 
 // Helper function to get proper MIME type and codecs
