@@ -13,13 +13,14 @@ const joinPage = document.getElementById("join");
 const roomPage = document.getElementById("room");
 const videoPlayer = document.getElementById("video-player");
 
-// Initialize PeerJS with random ID
-// At the start of the file, add this global variable
-let isHost = false;  // Global host status
+// Global host status
+let isHost = false;
 
 function initializePeer(asHost) {
     const peerId = randomString(5, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
     isHost = asHost;  // Set global host status
+    localStorage.setItem("isHost", asHost.toString());  // Also store in localStorage
+    
     peer = new Peer(peerId);
     
     peer.on('open', (id) => {
@@ -44,7 +45,6 @@ function initializePeer(asHost) {
     });
 }
 
-// Set up peer connection and handle data
 function setupConnection(conn) {
     connections[conn.peer] = conn;
     console.log('Setting up connection with peer:', conn.peer);
@@ -52,19 +52,15 @@ function setupConnection(conn) {
     conn.on('data', (data) => {
         console.log('Received data type:', data.type);
         if (data.type === 'video-chunk') {
-            console.log(`Received chunk: ${data.offset}/${data.total} bytes`);
             handleVideoChunk(data);
         } else if (data.type === 'video-metadata') {
-            console.log('Received video metadata:', data);
             handleVideoMetadata(data);
         } else if (data.type === 'video-request') {
-            console.log('Received video request, isHost:', localStorage.getItem("isHost"));
+            console.log('Received video request, isHost:', isHost);
             console.log('Video file available:', !!videoFile);
-            if (localStorage.getItem("isHost") === "true" && videoFile) {
+            if (isHost && videoFile) {
                 console.log('Starting video stream to peer');
                 startStreamingTo(conn);
-            } else {
-                console.log('Cannot stream: isHost=', localStorage.getItem("isHost"), 'videoFile=', !!videoFile);
             }
         } else if (data.type === 'chat') {
             append({
@@ -72,13 +68,15 @@ function setupConnection(conn) {
                 content: data.message,
                 pfp: data.pfp
             });
+        } else if (data.type === 'control') {
+            handleVideoControl(data);
         }
     });
     
     conn.on('open', () => {
         console.log('Connection opened to:', conn.peer);
-        if (localStorage.getItem("isHost") !== "true") {
-            console.log('Requesting video from host');
+        if (!isHost) {
+            console.log('Client requesting video from host');
             conn.send({
                 type: 'video-request'
             });
@@ -90,15 +88,6 @@ function setupConnection(conn) {
         notyf.error("Connection error occurred");
     });
     
-    conn.on('open', () => {
-        console.log('Connection opened to:', conn.peer);
-        if (localStorage.getItem("isHost") !== "true") {
-            conn.send({
-                type: 'video-request'
-            });
-        }
-    });
-
     conn.on('close', () => {
         delete connections[conn.peer];
         append({
@@ -109,7 +98,6 @@ function setupConnection(conn) {
     });
 }
 
-// Stream video to peers
 async function startStreamingTo(conn) {
     try {
         if (!videoFile) {
@@ -151,6 +139,12 @@ async function startStreamingTo(conn) {
     }
 }
 
+// Handle incoming video chunks
+let receivedChunks = [];
+let receivedSize = 0;
+let expectedSize = 0;
+let videoType = '';
+
 function handleVideoMetadata(data) {
     console.log('Received video metadata:', data);
     expectedSize = data.size;
@@ -165,7 +159,6 @@ function handleVideoChunk(data) {
     receivedSize += data.data.byteLength;
     
     if (receivedSize === expectedSize) {
-        console.log('All chunks received, creating video blob');
         const blob = new Blob(receivedChunks, { type: videoType });
         const url = URL.createObjectURL(blob);
         videoPlayer.src = url;
@@ -174,30 +167,27 @@ function handleVideoChunk(data) {
     }
 }
 
-// Handle incoming video chunks
-let receivedChunks = [];
-let receivedSize = 0;
-let expectedSize = 0;
-let videoType = '';
-
-function handleVideoMetadata(data) {
-    console.log('Received video metadata:', data);
-    expectedSize = data.size;
-    videoType = data.type;
-    receivedChunks = [];
-    receivedSize = 0;
-}
-
-function handleVideoChunk(data) {
-    receivedChunks.push(data.data);
-    receivedSize += data.data.byteLength;
+function handleVideoControl(data) {
+    if (!allowEmit) return;
     
-    if (receivedSize === expectedSize) {
-        const blob = new Blob(receivedChunks, { type: videoType });
-        const url = URL.createObjectURL(blob);
-        videoPlayer.src = url;
-        receivedChunks = [];
-        notyf.success("Video received successfully");
+    if (data.action === 'play' && videoPlayer.paused) {
+        videoPlayer.currentTime = data.time;
+        videoPlayer.play();
+        const content = time("played", data.username || "Someone", data.time);
+        append({
+            name: "Local Party",
+            content: content,
+            pfp: "#f3dfbf"
+        });
+    } else if (data.action === 'pause' && !videoPlayer.paused) {
+        videoPlayer.currentTime = data.time;
+        videoPlayer.pause();
+        const content = time("paused", data.username || "Someone", data.time);
+        append({
+            name: "Local Party",
+            content: content,
+            pfp: "#f3dfbf"
+        });
     }
 }
 
@@ -236,7 +226,7 @@ function append(message) {
 function appendData(roomName, roomCode) {
     append({name: "Local Party", content: "Local Party allows you to watch local videos with your friends synchronously while chatting.", pfp: "#f3dfbf"});
     append({name: "Local Party", content: `Welcome to ${roomName}`, pfp: "#f3dfbf"});
-    append({name: "Local Party", content: `Share the room code (${roomCode}) with others to invite them to the party.`, pff: "#f3dfbf"});
+    append({name: "Local Party", content: `Share the room code (${roomCode}) with others to invite them to the party.`, pfp: "#f3dfbf"});
     append({name: "Local Party", content: "The video will be automatically shared with others who join.", pfp: "#f3dfbf"});
 }
 
@@ -244,28 +234,14 @@ function appendData(roomName, roomCode) {
 function onChangeFile() {
     const file = document.getElementById("file-id").files[0];
     if (file) {
-        // Store the actual file object for streaming
         videoFile = file;
-        // Create preview URL for host's video player
         const path = (window.URL || window.webkitURL).createObjectURL(file);
         videoPlayer.src = path;
-        localStorage.setItem("videoSize", file.size);
         console.log('Host video file loaded:', {
             name: file.name,
             size: file.size,
             type: file.type
         });
-    }
-}
-
-function onChangeJoinFile() {
-    const file = document.getElementById("join-file-id").files[0];
-    if (file) {
-        videoFile = file;
-        const path = (window.URL || window.webkitURL).createObjectURL(file);
-        localStorage.setItem("videoPath", path);
-        localStorage.setItem("videoSize", file.size);
-        videoPlayer.src = path;
     }
 }
 
@@ -278,7 +254,8 @@ function videoControlsHandler(e) {
     const controlData = {
         type: 'control',
         action: e.type,
-        time: videoPlayer.currentTime
+        time: videoPlayer.currentTime,
+        username: localStorage.getItem("username")
     };
     
     Object.values(connections).forEach(conn => {
@@ -322,13 +299,12 @@ document.addEventListener("click", function(e) {
             return;
         }
         
-        // Set host status before initializing peer
-        localStorage.setItem("isHost", "true");
         localStorage.setItem("username", username);
         localStorage.setItem("roomName", roomName);
         
         console.log('Creating room as host with video:', videoFile.name);
         
+        // Initialize as host
         initializePeer(true);
         
         document.getElementById("roomNameText").innerHTML = roomName;
@@ -345,13 +321,6 @@ document.addEventListener("click", function(e) {
         joinPage.style.display = "block";
     }
     
-    else if (e.target.id === "joinRoomButton") {
-        landingPage.style.display = "none";
-        joinPage.style.display = "block";
-        // Remove file input requirement for joining
-        document.getElementById("join-file-id").style.display = "none";
-    }
-    
     else if (e.target.id === "roomJoinButton") {
         const hostPeerId = document.getElementById("roomCode").value;
         const username = document.getElementById("join-username").value;
@@ -361,10 +330,9 @@ document.addEventListener("click", function(e) {
             return;
         }
         
-        localStorage.setItem("isHost", "false");
         localStorage.setItem("username", username);
         
-        // Initialize peer and wait for connection to be established
+        // Initialize as non-host
         initializePeer(false);
         
         peer.on('open', () => {
@@ -374,11 +342,6 @@ document.addEventListener("click", function(e) {
             conn.on('open', () => {
                 console.log('Connected to host successfully');
                 setupConnection(conn);
-                
-                // Immediately request the video from host
-                conn.send({
-                    type: 'video-request'
-                });
                 
                 document.getElementById("roomCodeText").innerHTML = hostPeerId;
                 joinPage.style.display = "none";
