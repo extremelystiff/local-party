@@ -246,7 +246,7 @@ function setupConnection(conn) {
     const videoElement = document.querySelector('#video-player_html5_api');
     
     conn.on('data', async (data) => {
-        console.log('Received data type:', data.type);
+        console.log('Received data type:', data.type, data);
         
         try {
             switch (data.type) {
@@ -307,29 +307,28 @@ function setupConnection(conn) {
                                     } catch (e) {
                                         console.error('Error appending buffer:', e);
                                         if (e.name === 'QuotaExceededError') {
-                                            // Handle quota exceeded
                                             if (sourceBuffer.buffered.length > 0) {
                                                 const start = sourceBuffer.buffered.start(0);
                                                 const currentTime = player.currentTime();
-                                                // Remove buffer from start up to 10 seconds before current time
                                                 sourceBuffer.remove(start, Math.max(start, currentTime - 10));
-                                                pendingChunks.unshift(nextChunk); // Put chunk back
+                                                pendingChunks.unshift(nextChunk);
                                             }
                                         }
                                     }
                                 } else if (receivedSize >= expectedSize && pendingChunks.length === 0) {
-                                    // Only end stream when we've processed all chunks
                                     if (sourceBuffer.buffered.length > 0) {
                                         const buffered = sourceBuffer.buffered;
                                         const duration = buffered.end(buffered.length - 1);
                                         console.log(`Video fully processed. Duration: ${duration}s`);
                                         
-                                        // Wait a bit before ending the stream
                                         setTimeout(() => {
                                             if (mediaSource && mediaSource.readyState === 'open') {
                                                 mediaSource.endOfStream();
                                             }
                                         }, 1000);
+                                        
+                                        // Setup video control events after video is loaded
+                                        setupVideoControls();
                                     }
                                 }
                             });
@@ -373,8 +372,44 @@ function setupConnection(conn) {
                     break;
 
                 case 'control':
-                    if (mediaState.isReady && player) {
-                        handleVideoControl(data);
+                    console.log('Received control command:', data);
+                    if (player) {
+                        try {
+                            const currentTime = player.currentTime();
+                            
+                            switch(data.action) {
+                                case 'play':
+                                    console.log('Remote play command received');
+                                    if (Math.abs(currentTime - data.time) > 0.5) {
+                                        player.currentTime(data.time);
+                                    }
+                                    player.play();
+                                    break;
+                                    
+                                case 'pause':
+                                    console.log('Remote pause command received');
+                                    player.pause();
+                                    if (Math.abs(currentTime - data.time) > 0.5) {
+                                        player.currentTime(data.time);
+                                    }
+                                    break;
+                                    
+                                case 'seek':
+                                    console.log(`Remote seek command received: ${data.time}`);
+                                    player.currentTime(data.time);
+                                    break;
+                            }
+                            
+                            // Log the action in chat
+                            const content = time(data.action, data.username || "Someone", data.time);
+                            append({
+                                name: "Local Party",
+                                content: content,
+                                pfp: "#f3dfbf"
+                            });
+                        } catch (e) {
+                            console.error('Error handling video control:', e);
+                        }
                     }
                     break;
             }
@@ -399,6 +434,56 @@ function setupConnection(conn) {
     conn.on('error', (err) => {
         handleConnectionError(conn, err);
     });
+
+    // Helper function to set up video control events
+    function setupVideoControls() {
+        if (!player) return;
+
+        player.on('play', () => {
+            if (!allowEmit) return;
+            allowEmit = false;
+            
+            const controlData = {
+                type: 'control',
+                action: 'play',
+                time: player.currentTime(),
+                username: localStorage.getItem("username")
+            };
+            
+            conn.send(controlData);
+            setTimeout(() => { allowEmit = true; }, 500);
+        });
+
+        player.on('pause', () => {
+            if (!allowEmit) return;
+            allowEmit = false;
+            
+            const controlData = {
+                type: 'control',
+                action: 'pause',
+                time: player.currentTime(),
+                username: localStorage.getItem("username")
+            };
+            
+            conn.send(controlData);
+            setTimeout(() => { allowEmit = true; }, 500);
+        });
+
+        player.on('seeking', () => {
+            if (!allowEmit) return;
+            allowEmit = false;
+            
+            const controlData = {
+                type: 'control',
+                action: 'seek',
+                time: player.currentTime(),
+                username: localStorage.getItem("username")
+            };
+            
+            conn.send(controlData);
+            setTimeout(() => { allowEmit = true; }, 500);
+        });
+    }
 }
 
 let isProcessingChunks = false;
@@ -763,24 +848,17 @@ function initializePlayerEvents() {
 
     // Handle play/pause events
     player.on('play', () => {
-        console.log('Local play event');
-        if (!allowEmit) return;
-        
+        console.log('Local play event triggered');
         broadcastVideoControl('play');
     });
 
     player.on('pause', () => {
-        console.log('Local pause event');
-        if (!allowEmit) return;
-        
+        console.log('Local pause event triggered');
         broadcastVideoControl('pause');
     });
 
-    // Handle seeking
     player.on('seeking', () => {
-        console.log('Local seek event');
-        if (!allowEmit) return;
-        
+        console.log('Local seek event triggered');
         broadcastVideoControl('seek');
     });
 }
@@ -794,10 +872,8 @@ function handleChatMessage(data) {
 }
 
 function broadcastVideoControl(action) {
-    allowEmit = false;  // Prevent echo
     const currentTime = player.currentTime();
-    
-    console.log(`Broadcasting ${action} at time ${currentTime}`);
+    console.log(`Broadcasting ${action} control at time ${currentTime}`);
     
     const controlData = {
         type: 'control',
@@ -806,15 +882,15 @@ function broadcastVideoControl(action) {
         username: localStorage.getItem("username")
     };
     
+    // Log what we're sending
+    console.log('Sending control data:', controlData);
+    
     // Send to all connected peers
     Object.values(connections).forEach(conn => {
         if (conn.open) {
             conn.send(controlData);
         }
     });
-
-    // Re-enable control emission after a delay
-    setTimeout(() => { allowEmit = true; }, 500);
 }
 // Helper function to handle connection close
 function handleConnectionClose(conn) {
@@ -1382,19 +1458,19 @@ function initializePlayerControls() {
 }
 // Handle video controls
 function handleVideoControl(data) {
-    if (!allowEmit || !player) return;
-    
-    allowEmit = false;  // Prevent echo
+    if (!player) return;
     
     try {
+        console.log('Processing control event:', data);
         const currentTime = player.currentTime();
-        console.log(`Received ${data.action} command at time ${data.time}, current time: ${currentTime}`);
 
         switch(data.action) {
             case 'play':
+                console.log('Handling play command');
                 if (player.paused()) {
                     // First sync time if needed
                     if (Math.abs(currentTime - data.time) > 0.5) {
+                        console.log(`Syncing time before play: ${currentTime} -> ${data.time}`);
                         player.currentTime(data.time);
                     }
                     player.play().catch(e => console.error('Play failed:', e));
@@ -1402,18 +1478,21 @@ function handleVideoControl(data) {
                 break;
                 
             case 'pause':
+                console.log('Handling pause command');
                 if (!player.paused()) {
                     player.pause();
                     // Sync time after pausing
                     if (Math.abs(currentTime - data.time) > 0.5) {
+                        console.log(`Syncing time after pause: ${currentTime} -> ${data.time}`);
                         player.currentTime(data.time);
                     }
                 }
                 break;
                 
             case 'seek':
+                console.log('Handling seek command');
                 if (Math.abs(currentTime - data.time) > 0.5) {
-                    console.log(`Seeking from ${currentTime} to ${data.time}`);
+                    console.log(`Seeking: ${currentTime} -> ${data.time}`);
                     player.currentTime(data.time);
                 }
                 break;
@@ -1432,9 +1511,6 @@ function handleVideoControl(data) {
     } catch (e) {
         console.error('Error handling video control:', e);
     }
-    
-    // Re-enable control emission after a delay
-    setTimeout(() => { allowEmit = true; }, 500);
 }
 
 // Helper function for generating random strings
