@@ -401,32 +401,87 @@ function handleVideoComplete(metadataInitialized, mediaSourceReady) {
 function initializePlayerEvents() {
     if (!player) return;
 
-    player.on('timeupdate', checkBuffer);
-    
-player.on('waiting', () => {
-    console.log('Video waiting for data');
-    
-    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-        const currentTime = player.currentTime();
-        
-        // Log all buffer ranges
-        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-            const start = sourceBuffer.buffered.start(i);
-            const end = sourceBuffer.buffered.end(i);
-            console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+    // Check buffer status periodically
+    const bufferCheckInterval = setInterval(() => {
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
+            const bufferedRanges = [];
             
-            // If we're in or near this range
-            if (currentTime >= start - 0.1 && currentTime <= end + 0.1) {
-                console.log(`Currently in buffer range ${i}`);
+            // Log all buffer ranges
+            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                const start = sourceBuffer.buffered.start(i);
+                const end = sourceBuffer.buffered.end(i);
+                bufferedRanges.push({ start, end });
+                console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+            }
+
+            // Check if current time is in any buffered range
+            const inBufferedRange = bufferedRanges.some(
+                range => currentTime >= range.start && currentTime <= range.end
+            );
+
+            // If not in a buffered range or near the end of one, process more chunks
+            if (!inBufferedRange || 
+                bufferedRanges.some(range => 
+                    currentTime >= range.start && 
+                    range.end - currentTime < 5)
+            ) {
+                console.log('Need more buffer, processing chunks');
+                if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                    processNextChunk();
+                }
+            }
+        }
+    }, 1000);  // Check every second
+
+    player.on('timeupdate', () => {
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
+            const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+            
+            // If we're getting close to the end of our buffer
+            if (end - currentTime < 5) {
+                if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                    processNextChunk();
+                }
+            }
+        }
+    });
+    
+    player.on('waiting', () => {
+        console.log('Video waiting for data');
+        
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
+            
+            // Log all buffer ranges
+            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                const start = sourceBuffer.buffered.start(i);
+                const end = sourceBuffer.buffered.end(i);
+                console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+                
+                // Process more chunks if we're near this range
+                if (Math.abs(currentTime - start) < 1 || Math.abs(currentTime - end) < 1) {
+                    if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                        console.log('Processing more chunks near current time');
+                        processNextChunk();
+                    }
+                }
             }
         }
         
-        // If we have pending chunks, process them
+        // Always try to process more chunks when waiting
         if (pendingChunks.length > 0 && !sourceBuffer.updating) {
             processNextChunk();
         }
-    }
-});
+    });
+
+    player.on('seeking', () => {
+        console.log('Seeking detected');
+        if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+            processNextChunk();
+        }
+    });
 
     player.on('playing', () => {
         console.log('Video started playing');
@@ -437,6 +492,11 @@ player.on('waiting', () => {
         if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
             processNextChunk();
         }
+    });
+
+    // Cleanup interval when player is disposed
+    player.on('dispose', () => {
+        clearInterval(bufferCheckInterval);
     });
 }
 
