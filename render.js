@@ -52,8 +52,10 @@ function setupConnection(conn) {
     conn.on('data', (data) => {
         console.log('Received data type:', data.type);
         if (data.type === 'video-chunk') {
+            console.log('Received video chunk:', data.offset, '/', data.total);
             handleVideoChunk(data);
         } else if (data.type === 'video-metadata') {
+            console.log('Received video metadata for:', data.name);
             handleVideoMetadata(data);
         } else if (data.type === 'video-request') {
             console.log('Received video request, isHost:', isHost);
@@ -153,6 +155,11 @@ function handleVideoMetadata(data) {
     videoType = data.type;
     receivedChunks = [];
     receivedSize = 0;
+    
+    // Clear any existing video
+    videoPlayer.src = '';
+    videoFile = null;
+    
     notyf.success("Starting to receive video");
 }
 
@@ -349,6 +356,10 @@ document.addEventListener("click", function(e) {
         // Initialize as non-host
         initializePeer(false);
         
+        // Clear any existing video
+        videoPlayer.src = '';
+        videoFile = null;
+        
         peer.on('open', () => {
             console.log('Connecting to host:', hostPeerId);
             const conn = peer.connect(hostPeerId);
@@ -356,6 +367,12 @@ document.addEventListener("click", function(e) {
             conn.on('open', () => {
                 console.log('Connected to host successfully');
                 setupConnection(conn);
+                
+                // Immediately request video after connection is established
+                console.log('Requesting video from host');
+                conn.send({
+                    type: 'video-request'
+                });
                 
                 document.getElementById("roomCodeText").innerHTML = hostPeerId;
                 joinPage.style.display = "none";
