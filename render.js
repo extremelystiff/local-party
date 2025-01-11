@@ -232,6 +232,16 @@ function processNextChunk() {
     try {
         const chunk = pendingChunks.shift();
         sourceBuffer.appendBuffer(chunk);
+
+        // Start playback when we have enough data
+        if (!player.played().length && 
+            sourceBuffer.buffered.length > 0 && 
+            sourceBuffer.buffered.end(0) - sourceBuffer.buffered.start(0) >= 2) {
+            console.log('Buffer ready, starting playback');
+            player.play()
+                .then(() => console.log('Playback started'))
+                .catch(err => console.error('Playback failed:', err));
+        }
     } catch (e) {
         console.error('Error appending buffer:', e);
         if (pendingChunks.length) {
@@ -270,27 +280,43 @@ function handleVideoChunk(data) {
 
 // Handle video controls
 function handleVideoControl(data) {
-    if (!allowEmit) return;
+    if (!allowEmit || !player) return;
     
-    if (data.action === 'play' && player.paused()) {
-        player.currentTime(data.time);
-        player.play();
-        const content = time("played", data.username || "Someone", data.time);
-        append({
-            name: "Local Party",
-            content: content,
-            pfp: "#f3dfbf"
-        });
-    } else if (data.action === 'pause' && !player.paused()) {
-        player.currentTime(data.time);
-        player.pause();
-        const content = time("paused", data.username || "Someone", data.time);
-        append({
-            name: "Local Party",
-            content: content,
-            pfp: "#f3dfbf"
-        });
+    allowEmit = false;  // Prevent echo
+    
+    try {
+        // Always sync time first
+        if (Math.abs(player.currentTime() - data.time) > 0.5) {
+            console.log(`Syncing time from ${player.currentTime()} to ${data.time}`);
+            player.currentTime(data.time);
+        }
+
+        // Then handle play/pause
+        if (data.action === 'play' && player.paused()) {
+            console.log('Remote play command received');
+            player.play().catch(e => console.error('Play failed:', e));
+            const content = time("played", data.username || "Someone", data.time);
+            append({
+                name: "Local Party",
+                content: content,
+                pfp: "#f3dfbf"
+            });
+        } else if (data.action === 'pause' && !player.paused()) {
+            console.log('Remote pause command received');
+            player.pause();
+            const content = time("paused", data.username || "Someone", data.time);
+            append({
+                name: "Local Party",
+                content: content,
+                pfp: "#f3dfbf"
+            });
+        }
+    } catch (e) {
+        console.error('Error handling video control:', e);
     }
+    
+    // Re-enable control emission after a delay
+    setTimeout(() => { allowEmit = true; }, 500);
 }
 
 // Helper function for generating random strings
@@ -373,28 +399,81 @@ function onChangeFile() {
 function videoControlsHandler(e) {
     if (!allowEmit || !player) return;
     
-    const controlData = {
-        type: 'control',
-        action: e.type,
-        time: player.currentTime(),
-        username: localStorage.getItem("username")
-    };
+    allowEmit = false;  // Prevent control echo
     
-    Object.values(connections).forEach(conn => {
-        if (conn.open) {
-            conn.send(controlData);
+    try {
+        const currentTime = player.currentTime();
+        console.log(`Sending ${e.type} command at time ${currentTime}`);
+        
+        const controlData = {
+            type: 'control',
+            action: e.type,
+            time: currentTime,
+            username: localStorage.getItem("username")
+        };
+        
+        // Send to all connected peers
+        Object.values(connections).forEach(conn => {
+            if (conn.open) {
+                conn.send(controlData);
+            }
+        });
+        
+        // Log local action
+        const content = time(e.type === 'play' ? "played" : "paused", "You", currentTime);
+        append({
+            name: "Local Party",
+            content: content,
+            pfp: "#f3dfbf"
+        });
+    } catch (e) {
+        console.error('Error in video controls handler:', e);
+    }
+    
+    // Re-enable control emission after a delay
+    setTimeout(() => { allowEmit = true; }, 500);
+}
+
+// Additional video player event listeners
+function initializeVideoPlayerEvents() {
+    if (!player) return;
+    
+    // Handle seeking events
+    player.on('seeking', () => {
+        if (!allowEmit) return;
+        
+        allowEmit = false;
+        const currentTime = player.currentTime();
+        
+        Object.values(connections).forEach(conn => {
+            if (conn.open) {
+                conn.send({
+                    type: 'control',
+                    action: 'seek',
+                    time: currentTime,
+                    username: localStorage.getItem("username")
+                });
+            }
+        });
+        
+        setTimeout(() => { allowEmit = true; }, 500);
+    });
+    
+    // Handle buffering events
+    player.on('waiting', () => {
+        console.log('Video buffering...');
+        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+            processNextChunk();
         }
     });
     
-    const content = time(e.type === 'play' ? "played" : "paused", "You", player.currentTime());
-    append({
-        name: "Local Party",
-        content: content,
-        pfp: "#f3dfbf"
+    // Handle playback errors
+    player.on('error', (error) => {
+        console.error('Video playback error:', error);
+        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+            processNextChunk();
+        }
     });
-    
-    allowEmit = false;
-    setTimeout(() => { allowEmit = true; }, 500);
 }
 
 // Set up event listeners
