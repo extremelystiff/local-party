@@ -22,6 +22,9 @@ let mediaSource = null;
 let sourceBuffer = null;
 let pendingChunks = [];
 let isBuffering = false;
+let receivedSize = 0;
+let expectedSize = 0;
+let videoType = '';
 
 // Initialize the application
 function initializeApp() {
@@ -200,6 +203,11 @@ async function startStreamingTo(conn) {
 function handleVideoMetadata(data) {
     console.log('Received video metadata:', data);
     
+    // Reset received data tracking
+    receivedSize = 0;
+    expectedSize = data.size;
+    videoType = data.type || 'video/webm;codecs="vp8,opus"';
+    
     try {
         // Reset state
         pendingChunks = [];
@@ -319,6 +327,11 @@ function processNextChunk() {
 // Handle incoming video chunk
 function handleVideoChunk(data) {
     try {
+        if (!expectedSize) {
+            console.error('Expected size not set, waiting for metadata');
+            return;
+        }
+        
         const chunk = new Uint8Array(data.data);
         receivedSize += chunk.byteLength;
         
