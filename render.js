@@ -183,6 +183,8 @@ function handleVideoMetadata(data) {
 
 function handleVideoChunk(data) {
     try {
+        if (!isReceivingVideo) return;
+        
         // Store the raw ArrayBuffer data
         receivedChunks.push(data.data);
         receivedSize += data.data.byteLength;
@@ -193,14 +195,15 @@ function handleVideoChunk(data) {
         if (receivedSize === expectedSize) {
             console.log('All chunks received, creating video blob');
             
-            // Convert chunks to Uint8Array before creating blob
+            // Combine all chunks into a single ArrayBuffer
             const fullBuffer = new Uint8Array(receivedSize);
             let offset = 0;
             
-            receivedChunks.forEach(chunk => {
-                fullBuffer.set(new Uint8Array(chunk), offset);
+            for (const chunk of receivedChunks) {
+                const chunkArray = new Uint8Array(chunk);
+                fullBuffer.set(chunkArray, offset);
                 offset += chunk.byteLength;
-            });
+            }
             
             const blob = new Blob([fullBuffer], { type: videoType });
             console.log('Created blob:', {
@@ -214,19 +217,30 @@ function handleVideoChunk(data) {
                 URL.revokeObjectURL(videoPlayer.src);
             }
             
+            // Create object URL and set up video player
             const url = URL.createObjectURL(blob);
             videoPlayer.src = url;
             
-            // Verify the video is playable
-            videoPlayer.onloadeddata = () => {
-                console.log('Video loaded successfully');
-                notyf.success("Video received and loaded successfully");
-            };
+            // Reset video player state
+            videoPlayer.currentTime = 0;
+            videoPlayer.style.display = 'block';
             
-            videoPlayer.onerror = (e) => {
-                console.error('Error loading video:', videoPlayer.error);
+            // Wait for video to be loaded before enabling play
+            videoPlayer.addEventListener('loadedmetadata', () => {
+                console.log('Video metadata loaded:', {
+                    duration: videoPlayer.duration,
+                    videoWidth: videoPlayer.videoWidth,
+                    videoHeight: videoPlayer.videoHeight
+                });
+                isReceivingVideo = false;
+                notyf.success("Video ready to play");
+            }, { once: true });
+            
+            videoPlayer.addEventListener('error', (e) => {
+                console.error('Video error:', videoPlayer.error);
                 notyf.error("Error loading video: " + (videoPlayer.error?.message || 'Unknown error'));
-            };
+                isReceivingVideo = false;
+            }, { once: true });
             
             receivedChunks = [];
             receivedSize = 0;
@@ -234,6 +248,7 @@ function handleVideoChunk(data) {
     } catch (error) {
         console.error('Error handling video chunk:', error);
         notyf.error("Error processing video chunk: " + error.message);
+        isReceivingVideo = false;
     }
 }
 
