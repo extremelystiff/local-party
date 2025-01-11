@@ -1,3 +1,4 @@
+// Initialize Notyf for notifications
 const notyf = new Notyf({ duration: 1500, position: { x: 'center', y: 'top' } });
 
 // PeerJS variables
@@ -13,23 +14,21 @@ const joinPage = document.getElementById("join");
 const roomPage = document.getElementById("room");
 const videoPlayer = document.getElementById("video-player");
 
-// Global host status
+// Global status variables
 let isHost = false;
-
-// At the top of your file, after your initial variable declarations
 let player = null;
 let allowEmit = true;
-
 let mediaSource = null;
 let sourceBuffer = null;
 let pendingChunks = [];
 let isBuffering = false;
 
+// Initialize the application
 function initializeApp() {
     console.log('Initializing app...');
     
     try {
-        // Initialize video.js with MediaSource support
+        // Initialize video.js player
         player = videojs('video-player', {
             controls: true,
             preload: 'auto',
@@ -41,16 +40,14 @@ function initializeApp() {
                 nativeVideoTracks: false,
                 nativeAudioTracks: false,
                 nativeTextTracks: false
-            },
-            techOrder: ['html5']
+            }
         });
         
         console.log('Video.js initialized');
         
-        // Add error handling
-        player.on('error', function() {
+        // Set up video player event handlers
+        player.on('error', function(error) {
             console.error('Video.js error:', player.error());
-            // Try to recover
             if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
                 processNextChunk();
             }
@@ -63,6 +60,10 @@ function initializeApp() {
             }
         });
 
+        // Add play/pause event listeners
+        player.on('play', videoControlsHandler);
+        player.on('pause', videoControlsHandler);
+
         // Show landing page
         if (landingPage) {
             landingPage.style.display = "block";
@@ -73,33 +74,30 @@ function initializeApp() {
     }
 }
 
-// Ensure the DOM is loaded before initializing
+// Initialize on DOM load
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initializeApp);
 } else {
     initializeApp();
 }
 
+// Initialize PeerJS connection
 function initializePeer(asHost) {
     const peerId = randomString(5, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
-    isHost = asHost;  // Set global host status
-    localStorage.setItem("isHost", asHost.toString());  // Also store in localStorage
+    isHost = asHost;
+    localStorage.setItem("isHost", asHost.toString());
     
     peer = new Peer(peerId);
     
     peer.on('open', (id) => {
         console.log('Connected to PeerJS with ID:', id);
         if (isHost) {
-            console.log('Initialized as host with video:', videoFile?.name);
             document.getElementById("roomCodeText").innerHTML = id;
         }
     });
 
     peer.on('connection', (conn) => {
         console.log('Incoming connection from:', conn.peer);
-        if (isHost && videoFile) {
-            console.log('Host ready to stream video:', videoFile.name);
-        }
         setupConnection(conn);
     });
 
@@ -109,53 +107,44 @@ function initializePeer(asHost) {
     });
 }
 
+// Set up peer connection
 function setupConnection(conn) {
     connections[conn.peer] = conn;
-    console.log('Setting up connection with peer:', conn.peer);
     
     conn.on('data', (data) => {
         console.log('Received data type:', data.type);
-        if (data.type === 'video-chunk') {
-            console.log('Received video chunk:', data.offset, '/', data.total);
-            handleVideoChunk(data);
-        } else if (data.type === 'video-metadata') {
-            console.log('Received video metadata for:', data.name);
-            handleVideoMetadata(data);
-        } else if (data.type === 'video-request') {
-            console.log('Received video request, isHost:', isHost);
-            console.log('Video file available:', !!videoFile);
-            if (isHost && videoFile) {
-                console.log('Starting video stream to peer');
-                startStreamingTo(conn);
-            }
-        } else if (data.type === 'chat') {
-            append({
-                name: data.username,
-                content: data.message,
-                pfp: data.pfp
-            });
-        } else if (data.type === 'control') {
-            handleVideoControl(data);
+        
+        switch (data.type) {
+            case 'video-chunk':
+                handleVideoChunk(data);
+                break;
+            case 'video-metadata':
+                handleVideoMetadata(data);
+                break;
+            case 'video-request':
+                if (isHost && videoFile) {
+                    startStreamingTo(conn);
+                }
+                break;
+            case 'chat':
+                append({
+                    name: data.username,
+                    content: data.message,
+                    pfp: data.pfp
+                });
+                break;
+            case 'control':
+                handleVideoControl(data);
+                break;
         }
     });
     
     conn.on('open', () => {
-        console.log('Connection opened to:', conn.peer);
         if (!isHost) {
-            console.log('Client requesting video from host');
-            // Clear any existing video source for peer
-            videoPlayer.src = '';
-            conn.send({
-                type: 'video-request'
-            });
+            conn.send({ type: 'video-request' });
         }
     });
 
-    conn.on('error', (err) => {
-        console.error('Connection error:', err);
-        notyf.error("Connection error occurred");
-    });
-    
     conn.on('close', () => {
         delete connections[conn.peer];
         append({
@@ -166,34 +155,25 @@ function setupConnection(conn) {
     });
 }
 
+// Start streaming video to peer
 async function startStreamingTo(conn) {
     try {
         if (!videoFile) {
             throw new Error('No video file available');
         }
 
-        console.log('Starting video stream for peer:', conn.peer);
-
-        // Get the first few bytes to check video header
-        const headerChunk = await videoFile.slice(0, 4).arrayBuffer();
-        const header = new Uint8Array(headerChunk);
-        console.log('Video header bytes:', Array.from(header));
-
-        // Send metadata first with detailed format info
+        // Send metadata first
         conn.send({
             type: 'video-metadata',
             name: videoFile.name,
             size: videoFile.size,
             type: videoFile.type,
-            lastModified: videoFile.lastModified,
-            header: Array.from(header) // Send header bytes for format verification
+            lastModified: videoFile.lastModified
         });
 
         // Stream the chunks
         let offset = 0;
-        const totalSize = videoFile.size;
-        
-        while (offset < totalSize) {
+        while (offset < videoFile.size) {
             const chunk = videoFile.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
             
@@ -201,14 +181,13 @@ async function startStreamingTo(conn) {
                 type: 'video-chunk',
                 data: buffer,
                 offset: offset,
-                total: totalSize
+                total: videoFile.size
             });
             
             offset += buffer.byteLength;
             await new Promise(resolve => setTimeout(resolve, 50));
         }
         
-        console.log('Video streaming completed to peer:', conn.peer);
         notyf.success("Video sent to peer");
     } catch (err) {
         console.error('Error streaming video:', err);
@@ -216,29 +195,21 @@ async function startStreamingTo(conn) {
     }
 }
 
-// Handle incoming video chunks
-let receivedChunks = [];
-let receivedSize = 0;
-let expectedSize = 0;
-let videoType = '';
-
+// Handle incoming video metadata
 function handleVideoMetadata(data) {
     console.log('Received video metadata:', data);
-    expectedSize = data.size;
-    videoType = data.type || 'video/webm';
-    receivedChunks = [];
-    receivedSize = 0;
-    pendingChunks = [];
     
-    // Create new MediaSource
+    // Reset state
+    pendingChunks = [];
     mediaSource = new MediaSource();
-    const url = URL.createObjectURL(mediaSource);
-
-    // Set up MediaSource events
+    
+    // Set up MediaSource
     mediaSource.addEventListener('sourceopen', () => {
-        console.log('MediaSource opened');
         try {
-            sourceBuffer = mediaSource.addSourceBuffer(videoType);
+            // Use a more generic MIME type for better compatibility
+            const mimeType = 'video/webm; codecs="vp8,vorbis"';
+            sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+            sourceBuffer.mode = 'segments';
             sourceBuffer.addEventListener('updateend', processNextChunk);
             notyf.success("Starting to receive video");
         } catch (e) {
@@ -247,15 +218,14 @@ function handleVideoMetadata(data) {
         }
     });
 
-    // Update video source
-    if (player) {
-        player.src({ src: url, type: videoType });
-        player.load();
-    }
+    // Set player source
+    const url = URL.createObjectURL(mediaSource);
+    player.src({ src: url, type: 'video/webm' });
 }
 
+// Process next chunk in queue
 function processNextChunk() {
-    if (!sourceBuffer || !pendingChunks.length || sourceBuffer.updating) {
+    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0) {
         return;
     }
 
@@ -264,34 +234,26 @@ function processNextChunk() {
         sourceBuffer.appendBuffer(chunk);
     } catch (e) {
         console.error('Error appending buffer:', e);
-        // If error, try to process next chunk
         if (pendingChunks.length) {
             setTimeout(processNextChunk, 100);
         }
     }
 }
 
+// Handle incoming video chunk
 function handleVideoChunk(data) {
     try {
         const chunk = new Uint8Array(data.data);
-        receivedSize += chunk.byteLength;
-        
-        const percentage = Math.round((receivedSize / data.total) * 100);
-        console.log(`Received chunk: ${receivedSize}/${data.total} bytes (${percentage}%)`);
+        console.log(`Received chunk: ${data.offset}/${data.total} bytes (${Math.round((data.offset / data.total) * 100)}%)`);
 
-        // Add chunk to pending queue
         pendingChunks.push(chunk);
 
-        // Try to process chunk
         if (sourceBuffer && !sourceBuffer.updating) {
             processNextChunk();
         }
 
-        // If all chunks received
-        if (receivedSize === expectedSize) {
-            console.log('All chunks received');
-            
-            // Wait for all chunks to be processed
+        // Check if this was the last chunk
+        if (data.offset + chunk.byteLength >= data.total) {
             const checkComplete = setInterval(() => {
                 if (pendingChunks.length === 0 && !sourceBuffer.updating) {
                     clearInterval(checkComplete);
@@ -300,28 +262,28 @@ function handleVideoChunk(data) {
                 }
             }, 100);
         }
-
     } catch (error) {
         console.error('Error handling video chunk:', error);
-        notyf.error("Error processing video chunk: " + error.message);
+        notyf.error("Error processing video chunk");
     }
 }
 
+// Handle video controls
 function handleVideoControl(data) {
     if (!allowEmit) return;
     
-    if (data.action === 'play' && videoPlayer.paused) {
-        videoPlayer.currentTime = data.time;
-        videoPlayer.play();
+    if (data.action === 'play' && player.paused()) {
+        player.currentTime(data.time);
+        player.play();
         const content = time("played", data.username || "Someone", data.time);
         append({
             name: "Local Party",
             content: content,
             pfp: "#f3dfbf"
         });
-    } else if (data.action === 'pause' && !videoPlayer.paused) {
-        videoPlayer.currentTime = data.time;
-        videoPlayer.pause();
+    } else if (data.action === 'pause' && !player.paused()) {
+        player.currentTime(data.time);
+        player.pause();
         const content = time("paused", data.username || "Someone", data.time);
         append({
             name: "Local Party",
@@ -331,7 +293,7 @@ function handleVideoControl(data) {
     }
 }
 
-// Helper Functions
+// Helper function for generating random strings
 function randomString(length, chars) {
     let result = '';
     for (let i = length; i > 0; --i) {
@@ -340,14 +302,15 @@ function randomString(length, chars) {
     return result;
 }
 
+// Format time for messages
 function time(state, username, context) {
-    let hours = parseInt(Math.round(context) / 60 / 60, 10);
-    let minutes = parseInt((context / 60) % 60, 10);
-    let seconds = Math.round(context) % 60;
+    let hours = Math.floor(context / 3600);
+    let minutes = Math.floor((context % 3600) / 60);
+    let seconds = Math.floor(context % 60);
     
-    hours = hours < 10 ? "0" + hours.toString() : hours.toString();
-    minutes = minutes < 10 ? "0" + minutes.toString() : minutes.toString();
-    seconds = seconds < 10 ? "0" + seconds.toString() : seconds.toString();
+    hours = hours < 10 ? "0" + hours : hours;
+    minutes = minutes < 10 ? "0" + minutes : minutes;
+    seconds = seconds < 10 ? "0" + seconds : seconds;
     
     let contentString = `${username} ${state} the video at ${minutes}:${seconds}`;
     if (hours !== "00") {
@@ -356,43 +319,57 @@ function time(state, username, context) {
     return contentString;
 }
 
-// UI Functions
+// Append message to chat
 function append(message) {
     const messagesBox = document.getElementById("messages-box");
-    messagesBox.innerHTML += `<div class="col-12 mt-3" id="message"><span class="username" style="color: ${message.pfp}">${message.name}: </span>${message.content}</div>`;
+    messagesBox.innerHTML += `
+        <div class="col-12 mt-3" id="message">
+            <span class="username" style="color: ${message.pfp}">${message.name}: </span>
+            ${message.content}
+        </div>
+    `;
     messagesBox.scrollTop = messagesBox.scrollHeight;
 }
 
+// Append room data
 function appendData(roomName, roomCode) {
-    append({name: "Local Party", content: "Local Party allows you to watch local videos with your friends synchronously while chatting.", pfp: "#f3dfbf"});
-    append({name: "Local Party", content: `Welcome to ${roomName}`, pfp: "#f3dfbf"});
-    append({name: "Local Party", content: `Share the room code (${roomCode}) with others to invite them to the party.`, pfp: "#f3dfbf"});
-    append({name: "Local Party", content: "The video will be automatically shared with others who join.", pfp: "#f3dfbf"});
+    append({
+        name: "Local Party",
+        content: "Local Party allows you to watch local videos with your friends synchronously while chatting.",
+        pfp: "#f3dfbf"
+    });
+    append({
+        name: "Local Party",
+        content: `Welcome to ${roomName}`,
+        pfp: "#f3dfbf"
+    });
+    append({
+        name: "Local Party",
+        content: `Share the room code (${roomCode}) with others to invite them to the party.`,
+        pfp: "#f3dfbf"
+    });
+    append({
+        name: "Local Party",
+        content: "The video will be automatically shared with others who join.",
+        pfp: "#f3dfbf"
+    });
 }
 
-// File Handlers
+// Handle file selection
 function onChangeFile() {
     const fileInput = document.getElementById("file-id");
     if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
     
-    const file = fileInput.files[0];
-    videoFile = file;
-    const url = URL.createObjectURL(file);
+    videoFile = fileInput.files[0];
+    const url = URL.createObjectURL(videoFile);
     
-    // Update Video.js source
     player.src({
         src: url,
-        type: file.type
-    });
-    
-    console.log('Video file loaded:', {
-        name: file.name,
-        size: file.size,
-        type: file.type
+        type: videoFile.type
     });
 }
 
-// Video Control Handler
+// Video controls handler
 function videoControlsHandler(e) {
     if (!allowEmit || !player) return;
     
@@ -420,121 +397,125 @@ function videoControlsHandler(e) {
     setTimeout(() => { allowEmit = true; }, 500);
 }
 
-// Event Listeners
+// Set up event listeners
 document.addEventListener("click", function(e) {
-    if (e.target.id === "createRoomButton") {
-        landingPage.style.display = "none";
-        createPage.style.display = "block";
-    }
-    
-    else if (e.target.id === "roomCreateButton") {
-        const roomName = document.getElementById("roomname").value;
-        const username = document.getElementById("create-username").value;
-        
-        if (!roomName || !username) {
-            document.getElementById("createRoomText").innerHTML = "Please fill in all fields";
-            return;
-        }
-        
-        const fileInput = document.getElementById("file-id");
-        if (!fileInput || !fileInput.files || !fileInput.files[0]) {
-            document.getElementById("createRoomText").innerHTML = "Please select a video file";
-            return;
-        }
-        
-        // Ensure videoFile is set
-        if (!videoFile) {
-            videoFile = fileInput.files[0];
-        }
-        
-        localStorage.setItem("username", username);
-        localStorage.setItem("roomName", roomName);
-        
-        console.log('Creating room as host with video:', videoFile.name);
-        
-        // Initialize as host
-        initializePeer(true);
-        
-        document.getElementById("roomNameText").innerHTML = roomName;
-        document.getElementById("createRoomText").innerHTML = "";
-        createPage.style.display = "none";
-        document.title = `Local Party | ${roomName}`;
-        roomPage.style.display = "block";
-        
-        appendData(roomName, peer.id);
-    }
-    
-    else if (e.target.id === "joinRoomButton") {
-        landingPage.style.display = "none";
-        joinPage.style.display = "block";
-        // Hide file input for joining peers
-        const fileInput = document.getElementById("file-id");
-        if (fileInput) {
-            fileInput.style.display = "none";
-        }
-    }
-    
-    else if (e.target.id === "roomJoinButton") {
-        const hostPeerId = document.getElementById("roomCode").value;
-        const username = document.getElementById("join-username").value;
-        
-        if (!hostPeerId || !username) {
-            document.getElementById("joinRoomText").innerHTML = "Please fill in all fields";
-            return;
-        }
-        
-        localStorage.setItem("username", username);
-        
-        // Initialize as non-host
-        initializePeer(false);
-        
-        // Clear any existing video
-        videoPlayer.src = '';
-        videoFile = null;
-        
-        peer.on('open', () => {
-            console.log('Connecting to host:', hostPeerId);
-            const conn = peer.connect(hostPeerId);
+    switch (e.target.id) {
+        case "createRoomButton":
+            landingPage.style.display = "none";
+            createPage.style.display = "block";
+            break;
             
-            conn.on('open', () => {
-                console.log('Connected to host successfully');
-                setupConnection(conn);
-                
-                // Immediately request video after connection is established
-                console.log('Requesting video from host');
-                conn.send({
-                    type: 'video-request'
-                });
-                
-                document.getElementById("roomCodeText").innerHTML = hostPeerId;
-                joinPage.style.display = "none";
-                document.title = "Local Party | Room";
-                roomPage.style.display = "block";
-                appendData("Room", hostPeerId);
-            });
+        case "roomCreateButton":
+            handleRoomCreate();
+            break;
             
-            conn.on('error', (err) => {
-                console.error('Connection error:', err);
-                document.getElementById("joinRoomText").innerHTML = "Failed to connect to room";
-                notyf.error("Failed to connect to room");
-            });
-        });
-    }
-    
-    else if (e.target.id === "roomLeaveButton") {
-        Object.values(connections).forEach(conn => conn.close());
-        peer.destroy();
-        location.reload();
-    }
-    
-    else if (e.target.id === "backButton") {
-        joinPage.style.display = "none";
-        createPage.style.display = "none";
-        landingPage.style.display = "block";
+        case "joinRoomButton":
+            landingPage.style.display = "none";
+            joinPage.style.display = "block";
+            const fileInput = document.getElementById("file-id");
+            if (fileInput) fileInput.style.display = "none";
+            break;
+            
+        case "roomJoinButton":
+            handleRoomJoin();
+            break;
+            
+        case "roomLeaveButton":
+            Object.values(connections).forEach(conn => conn.close());
+            peer.destroy();
+            location.reload();
+            break;
+            
+        case "backButton":
+            joinPage.style.display = "none";
+            createPage.style.display = "none";
+            landingPage.style.display = "block";
+            break;
     }
 });
 
-// Chat Form Handler
+// Handle room creation
+function handleRoomCreate() {
+    const roomName = document.getElementById("roomname").value;
+    const username = document.getElementById("create-username").value;
+    
+    if (!roomName || !username) {
+        document.getElementById("createRoomText").innerHTML = "Please fill in all fields";
+        return;
+    }
+    
+    const fileInput = document.getElementById("file-id");
+    if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+        document.getElementById("createRoomText").innerHTML = "Please select a video file";
+        return;
+    }
+    
+    if (!videoFile) {
+        videoFile = fileInput.files[0];
+    }
+    
+    localStorage.setItem("username", username);
+    localStorage.setItem("roomName", roomName);
+    
+    initializePeer(true);
+    
+    document.getElementById("roomNameText").innerHTML = roomName;
+    document.getElementById("createRoomText").innerHTML = "";
+    createPage.style.display = "none";
+    document.title = `Local Party | ${roomName}`;
+    roomPage.style.display = "block";
+    
+    appendData(roomName, peer.id);
+}
+
+// Handle room joining
+function handleRoomJoin() {
+    const hostPeerId = document.getElementById("roomCode").value;
+    const username = document.getElementById("join-username").value;
+    
+    if (!hostPeerId || !username) {
+        document.getElementById("joinRoomText").innerHTML = "Please fill in all fields";
+        return;
+    }
+    
+    localStorage.setItem("username", username);
+    
+    initializePeer(false);
+    
+    // Clear any existing video
+    if (player) {
+        player.reset();
+    }
+    videoFile = null;
+    
+    peer.on('open', () => {
+        console.log('Connecting to host:', hostPeerId);
+        const conn = peer.connect(hostPeerId);
+        
+        conn.on('open', () => {
+            console.log('Connected to host successfully');
+            setupConnection(conn);
+            
+            conn.send({
+                type: 'video-request'
+            });
+            
+            document.getElementById("roomCodeText").innerHTML = hostPeerId;
+            joinPage.style.display = "none";
+            document.title = "Local Party | Room";
+            roomPage.style.display = "block";
+            appendData("Room", hostPeerId);
+        });
+        
+        conn.on('error', (err) => {
+            console.error('Connection error:', err);
+            document.getElementById("joinRoomText").innerHTML = "Failed to connect to room";
+            notyf.error("Failed to connect to room");
+        });
+    });
+}
+
+// Set up chat form handling
 const form = document.getElementById("send-form");
 form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -565,12 +546,15 @@ form.addEventListener('submit', (e) => {
     }
 });
 
-// Initialize UI
+// Set up room code click-to-copy
 document.getElementById('roomCodeText').addEventListener('click', () => {
     const text = document.getElementById('roomCodeText').innerHTML;
-    navigator.clipboard.writeText(text).then(() => {
-        notyf.success("Copied to clipboard");
-    });
+    navigator.clipboard.writeText(text)
+        .then(() => {
+            notyf.success("Room code copied to clipboard");
+        })
+        .catch(err => {
+            console.error('Failed to copy room code:', err);
+            notyf.error("Failed to copy room code");
+        });
 });
-
-
