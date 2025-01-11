@@ -203,10 +203,66 @@ async function startStreamingTo(conn) {
 function handleVideoMetadata(data) {
     console.log('Received video metadata:', data);
     
-    // Reset received data tracking
-    receivedSize = 0;
-    expectedSize = data.size;
-    videoType = data.type || 'video/webm;codecs="vp8,opus"';
+    try {
+        // Reset state
+        pendingChunks = [];
+        receivedSize = 0;
+        expectedSize = data.size;
+        videoType = data.type || 'video/webm;codecs="vp8,opus"';
+        
+        console.log(`Initializing stream: size=${expectedSize}, type=${videoType}`);
+        
+        // Create new MediaSource
+        mediaSource = new MediaSource();
+        const url = URL.createObjectURL(mediaSource);
+        
+        // Set up MediaSource
+        mediaSource.addEventListener('sourceopen', () => {
+            try {
+                console.log('MediaSource opened, setting up source buffer');
+                
+                // Create source buffer
+                sourceBuffer = mediaSource.addSourceBuffer(videoType);
+                sourceBuffer.mode = 'sequence';
+                
+                sourceBuffer.addEventListener('updateend', () => {
+                    console.log('Source buffer updated, checking queue');
+                    processNextChunk();
+                });
+                
+                sourceBuffer.addEventListener('error', (e) => {
+                    console.error('Source buffer error:', e);
+                });
+                
+                notyf.success("Starting to receive video");
+                
+                // Process any chunks that arrived before metadata was ready
+                if (pendingChunks.length > 0) {
+                    console.log(`Processing ${pendingChunks.length} queued chunks`);
+                    processNextChunk();
+                }
+            } catch (e) {
+                console.error('Error in sourceopen:', e);
+                notyf.error("Error setting up video stream: " + e.message);
+            }
+        });
+        
+        // Set up player
+        console.log('Setting player source to:', url);
+        player.src({
+            src: url,
+            type: videoType
+        });
+        
+        // Reset player state
+        player.currentTime(0);
+        player.pause();
+        
+    } catch (e) {
+        console.error('Error in handleVideoMetadata:', e);
+        notyf.error("Error setting up video stream: " + e.message);
+    }
+}
     
     try {
         // Reset state
@@ -326,14 +382,55 @@ function processNextChunk() {
 
 // Handle incoming video chunk
 function handleVideoChunk(data) {
+    const chunk = new Uint8Array(data.data);
+    
+    // Always queue the chunk, even if metadata isn't ready
+    pendingChunks.push(chunk);
+    
+    if (!expectedSize) {
+        console.log('Queuing chunk while waiting for metadata');
+        return;
+    }
+    
     try {
-        if (!expectedSize) {
-            console.error('Expected size not set, waiting for metadata');
-            return;
-        }
-        
-        const chunk = new Uint8Array(data.data);
         receivedSize += chunk.byteLength;
+        const percentage = Math.round((receivedSize / expectedSize) * 100);
+        console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${percentage}%)`);
+
+        // Try to process if source buffer is ready
+        if (sourceBuffer && !sourceBuffer.updating) {
+            processNextChunk();
+        }
+
+        // If this was the last chunk
+        if (receivedSize >= expectedSize) {
+            console.log('All chunks received, finishing stream');
+            
+            // Wait for all chunks to be processed
+            const checkComplete = setInterval(() => {
+                if (pendingChunks.length === 0 && !sourceBuffer.updating) {
+                    clearInterval(checkComplete);
+                    console.log('All chunks processed, ending stream');
+                    
+                    try {
+                        mediaSource.endOfStream();
+                        notyf.success("Video fully loaded");
+                        
+                        // Ensure video is playing if it should be
+                        if (!player.paused()) {
+                            player.play().catch(e => console.error('Play after complete failed:', e));
+                        }
+                    } catch (e) {
+                        console.error('Error ending stream:', e);
+                    }
+                }
+            }, 100);
+        }
+    } catch (error) {
+        console.error('Error handling video chunk:', error);
+        notyf.error("Error processing video chunk: " + error.message);
+    }
+}
         
         const percentage = Math.round((receivedSize / data.total) * 100);
         console.log(`Received chunk: ${receivedSize}/${data.total} bytes (${percentage}%)`);
