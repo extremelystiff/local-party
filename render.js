@@ -461,53 +461,60 @@ async function processNextSegment() {
     }
 }
 async function processChunkBatch() {
-    if (!sourceBuffer || sourceBuffer.updating || !mediaSource || mediaSource.readyState !== 'open') {
-        console.log('Source buffer or media source not ready:', {
-            hasSourceBuffer: !!sourceBuffer,
-            isUpdating: sourceBuffer?.updating,
-            mediaSourceState: mediaSource?.readyState
-        });
-        return;
+    if (!sourceBuffer || sourceBuffer.updating) return;
+
+    console.log(`Processing ${pendingChunks.length} chunks...`);
+    
+    // Combine all chunks into one sequential buffer
+    const totalSize = pendingChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    const combinedBuffer = new Uint8Array(totalSize);
+    let offset = 0;
+
+    for (const chunk of pendingChunks) {
+        combinedBuffer.set(new Uint8Array(chunk), offset);
+        offset += chunk.byteLength;
     }
 
-    console.log(`Starting to process ${pendingChunks.length} total chunks`);
-    let processedChunks = 0;
+    console.log(`Combined ${pendingChunks.length} chunks into ${totalSize} bytes`);
 
     try {
-        for (let i = 0; i < pendingChunks.length; i++) {
-            // Check media source state before each chunk
-            if (mediaSource.readyState !== 'open') {
-                console.log('MediaSource no longer open, stopping processing');
-                break;
-            }
+        // Append the entire combined buffer
+        await new Promise((resolve, reject) => {
+            const handleUpdateEnd = () => {
+                sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                sourceBuffer.removeEventListener('error', handleError);
+                resolve();
+            };
 
-            const chunk = pendingChunks[i];
-            console.log(`Processing chunk ${i + 1}/${pendingChunks.length} of size ${chunk.byteLength}`);
+            const handleError = (err) => {
+                sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                sourceBuffer.removeEventListener('error', handleError);
+                reject(err);
+            };
 
-            try {
-                await appendChunkWithRetry(chunk);
-                processedChunks++;
+            sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+            sourceBuffer.addEventListener('error', handleError);
 
-                // Log buffer state after successful append
-                if (sourceBuffer.buffered.length > 0) {
-                    for (let j = 0; j < sourceBuffer.buffered.length; j++) {
-                        console.log(`After chunk ${processedChunks} - Buffer range ${j}: ` +
-                                  `${sourceBuffer.buffered.start(j).toFixed(3)}s to ${sourceBuffer.buffered.end(j).toFixed(3)}s`);
-                    }
-                }
-            } catch (error) {
-                console.error(`Error processing chunk ${i + 1}:`, error);
-                break;
+            sourceBuffer.appendBuffer(combinedBuffer);
+        });
+
+        // Log the buffer ranges after append
+        if (sourceBuffer.buffered.length > 0) {
+            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
             }
         }
 
-        // Remove processed chunks
-        pendingChunks.splice(0, processedChunks);
-        console.log(`Successfully processed ${processedChunks} chunks, ${pendingChunks.length} remaining`);
+        // Clear pending chunks after successful append
+        pendingChunks = [];
 
     } catch (e) {
-        console.error('Error in processChunkBatch:', e);
-        console.log(`Processed ${processedChunks} chunks before error`);
+        console.error('Error appending combined buffer:', e);
+        if (e.name === 'QuotaExceededError') {
+            // If quota exceeded, try processing in smaller batches
+            pendingChunks = [combinedBuffer.buffer];
+            await handleQuotaExceeded();
+        }
     }
 }
 
