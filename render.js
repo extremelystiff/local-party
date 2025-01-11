@@ -16,6 +16,36 @@ const videoPlayer = document.getElementById("video-player");
 // Global host status
 let isHost = false;
 
+// Check if DOM is loaded
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeApp);
+} else {
+    initializeApp();
+}
+
+function initializeApp() {
+    console.log('DOM fully loaded');
+    
+    // Show landing page
+    if (landingPage) {
+        landingPage.style.display = "block";
+        console.log('Landing page displayed');
+    } else {
+        console.error('Landing page element not found');
+    }
+    
+    // Initialize Video.js
+    try {
+        player = videojs('video-player', {
+            controls: true,
+            preload: 'auto'
+        });
+        console.log('Video.js initialized');
+    } catch (e) {
+        console.error('Video.js initialization error:', e);
+    }
+}
+
 function initializePeer(asHost) {
     const peerId = randomString(5, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
     isHost = asHost;  // Set global host status
