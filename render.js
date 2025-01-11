@@ -406,18 +406,6 @@ function setupConnection(conn) {
                             console.error('Error processing chunk:', e);
                         }
                         break;
-                            }
-
-                        if (!inserted) {
-                            pendingChunks.push({
-                                data: chunk,
-                                offset: data.offset
-                            });
-                        }
-                    }
-                    
-                    receivedSize += chunk.byteLength;
-                    break;
 
                 case 'video-complete':
                     console.log('Video transfer complete');
