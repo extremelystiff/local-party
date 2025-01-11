@@ -27,6 +27,8 @@ let isBuffering = false;
 let receivedSize = 0;
 let expectedSize = 0;
 let videoType = '';
+let currentTimestamp = 0;
+let lastAppendedEnd = 0;
 
 // Initialize the application
 function initializeApp() {
@@ -427,12 +429,30 @@ function initializePlayerEvents() {
 
     player.on('timeupdate', checkBuffer);
     
-    player.on('waiting', () => {
-        console.log('Video waiting for data');
+player.on('waiting', () => {
+    console.log('Video waiting for data');
+    
+    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+        const currentTime = player.currentTime();
+        
+        // Log all buffer ranges
+        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+            const start = sourceBuffer.buffered.start(i);
+            const end = sourceBuffer.buffered.end(i);
+            console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+            
+            // If we're in or near this range
+            if (currentTime >= start - 0.1 && currentTime <= end + 0.1) {
+                console.log(`Currently in buffer range ${i}`);
+            }
+        }
+        
+        // If we have pending chunks, process them
         if (pendingChunks.length > 0 && !sourceBuffer.updating) {
             processNextChunk();
         }
-    });
+    }
+});
 
     player.on('playing', () => {
         console.log('Video started playing');
@@ -747,36 +767,59 @@ function processNextChunk() {
     }
 
     try {
-        const chunk = pendingChunks[0];
-        
-        // Check current buffer status before appending
+        // Check current buffer state
         if (sourceBuffer.buffered.length > 0) {
-            const currentEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-            console.log(`Current buffer ends at: ${currentEnd}s`);
+            // Find any gaps in the buffer
+            for (let i = 0; i < sourceBuffer.buffered.length - 1; i++) {
+                const gap = sourceBuffer.buffered.start(i + 1) - sourceBuffer.buffered.end(i);
+                console.log(`Gap detected: ${sourceBuffer.buffered.end(i)} to ${sourceBuffer.buffered.start(i + 1)}`);
+                
+                // If there's a significant gap, focus on filling it
+                if (gap > 0.1) {
+                    console.log(`Attempting to fill gap of ${gap}s`);
+                }
+            }
         }
-        
-        // Append the chunk
+
+        const chunk = pendingChunks[0];
         sourceBuffer.appendBuffer(chunk);
         pendingChunks.shift();
 
-        // After append, check if we need to normalize buffer
+        // After append, verify the buffer state
         sourceBuffer.addEventListener('updateend', () => {
-            logBufferStatus();
-            
-            // If we have multiple ranges, try to merge them
-            if (sourceBuffer.buffered.length > 1) {
-                console.log("Multiple ranges detected, attempting to normalize...");
-                const start = sourceBuffer.buffered.start(0);
-                const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                
-                // Remove any gaps
-                for (let i = 0; i < sourceBuffer.buffered.length - 1; i++) {
-                    const gap = sourceBuffer.buffered.start(i + 1) - sourceBuffer.buffered.end(i);
-                    if (gap < 0.5) { // If gap is less than 0.5 seconds
-                        console.log(`Removing gap between ranges ${i} and ${i + 1}`);
-                        sourceBuffer.remove(sourceBuffer.buffered.end(i), sourceBuffer.buffered.start(i + 1));
+            if (sourceBuffer.buffered.length > 0) {
+                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                    const start = sourceBuffer.buffered.start(i);
+                    const end = sourceBuffer.buffered.end(i);
+                    console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+                }
+
+                // If we detect gaps, try to fill them immediately
+                if (sourceBuffer.buffered.length > 1) {
+                    const currentTime = player.currentTime();
+                    
+                    // Find the range we're currently playing from
+                    for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                        const rangeStart = sourceBuffer.buffered.start(i);
+                        const rangeEnd = sourceBuffer.buffered.end(i);
+                        
+                        if (currentTime >= rangeStart && currentTime <= rangeEnd) {
+                            // If we're near the end of this range and there's another range
+                            if (i < sourceBuffer.buffered.length - 1 && 
+                                rangeEnd - currentTime < 2) {
+                                const nextRangeStart = sourceBuffer.buffered.start(i + 1);
+                                const gap = nextRangeStart - rangeEnd;
+                                console.log(`Near end of range ${i}, gap to next range: ${gap}s`);
+                            }
+                            break;
+                        }
                     }
                 }
+            }
+            
+            // Continue processing if we have more chunks
+            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                processNextChunk();
             }
         }, { once: true });
 
@@ -786,7 +829,8 @@ function processNextChunk() {
             if (sourceBuffer.buffered.length > 0) {
                 const currentTime = player.currentTime();
                 const start = sourceBuffer.buffered.start(0);
-                sourceBuffer.remove(start, currentTime - 30); // Keep more buffer
+                // Keep more buffer (60 seconds) before removing
+                sourceBuffer.remove(start, Math.max(start, currentTime - 60));
                 pendingChunks.unshift(chunk);
             }
         }
@@ -1258,12 +1302,30 @@ function initializeVideoPlayerEvents() {
     });
     
     // Handle buffering events
-    player.on('waiting', () => {
-        console.log('Video buffering...');
-        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
+player.on('waiting', () => {
+    console.log('Video waiting for data');
+    
+    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+        const currentTime = player.currentTime();
+        
+        // Log all buffer ranges
+        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+            const start = sourceBuffer.buffered.start(i);
+            const end = sourceBuffer.buffered.end(i);
+            console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+            
+            // If we're in or near this range
+            if (currentTime >= start - 0.1 && currentTime <= end + 0.1) {
+                console.log(`Currently in buffer range ${i}`);
+            }
+        }
+        
+        // If we have pending chunks, process them
+        if (pendingChunks.length > 0 && !sourceBuffer.updating) {
             processNextChunk();
         }
-    });
+    }
+});
     
     // Handle playback errors
     player.on('error', (error) => {
