@@ -532,3 +532,5 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('Video.js error:', player.error());
     });
 });
+// Show landing page on load
+landingPage.style.display = "block";
