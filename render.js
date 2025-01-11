@@ -25,8 +25,6 @@ let isBuffering = false;
 let receivedSize = 0;
 let expectedSize = 0;
 let videoType = '';
-let receivedSize = 0;
-let expectedSize = 0;
 
 // Initialize the application
 function initializeApp() {
