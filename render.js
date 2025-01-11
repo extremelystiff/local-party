@@ -16,34 +16,57 @@ const videoPlayer = document.getElementById("video-player");
 // Global host status
 let isHost = false;
 
-// Check if DOM is loaded
+// At the top of your file, after your initial variable declarations
+let player = null;
+let allowEmit = true;
+
+function initializeApp() {
+    console.log('Initializing app...');
+    
+    try {
+        // First initialize video.js
+        player = videojs('video-player', {
+            controls: true,
+            preload: 'auto',
+            fluid: true,
+            html5: {
+                vhs: {
+                    overrideNative: true
+                },
+                nativeVideoTracks: false,
+                nativeAudioTracks: false,
+                nativeTextTracks: false
+            }
+        });
+        
+        console.log('Video.js initialized');
+        
+        // Add error handling
+        player.on('error', function() {
+            console.error('Video.js error:', player.error());
+        });
+
+        // Add video control handlers
+        player.on('play', videoControlsHandler);
+        player.on('pause', videoControlsHandler);
+        
+        // Show landing page
+        if (landingPage) {
+            landingPage.style.display = "block";
+            console.log('Landing page displayed');
+        } else {
+            console.error('Landing page element not found');
+        }
+    } catch (e) {
+        console.error('Initialization error:', e);
+    }
+}
+
+// Ensure the DOM is loaded before initializing
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initializeApp);
 } else {
     initializeApp();
-}
-
-function initializeApp() {
-    console.log('DOM fully loaded');
-    
-    // Show landing page
-    if (landingPage) {
-        landingPage.style.display = "block";
-        console.log('Landing page displayed');
-    } else {
-        console.error('Landing page element not found');
-    }
-    
-    // Initialize Video.js
-    try {
-        player = videojs('video-player', {
-            controls: true,
-            preload: 'auto'
-        });
-        console.log('Video.js initialized');
-    } catch (e) {
-        console.error('Video.js initialization error:', e);
-    }
 }
 
 function initializePeer(asHost) {
@@ -538,29 +561,4 @@ document.getElementById('roomCodeText').addEventListener('click', () => {
     });
 });
 
-// Video.js player instance
-let player;
 
-// Initialize Video.js player
-document.addEventListener('DOMContentLoaded', () => {
-    player = videojs('video-player', {
-        controls: true,
-        preload: 'auto',
-        fluid: true,
-        html5: {
-            vhs: {
-                overrideNative: true
-            },
-            nativeVideoTracks: false,
-            nativeAudioTracks: false,
-            nativeTextTracks: false
-        }
-    });
-    
-    // Add error handling
-    player.on('error', function() {
-        console.error('Video.js error:', player.error());
-    });
-});
-// Show landing page on load
-landingPage.style.display = "block";
