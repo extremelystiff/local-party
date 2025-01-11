@@ -47,16 +47,44 @@ function setupConnection(conn) {
     conn.on('data', (data) => {
         console.log('Received data type:', data.type);
         if (data.type === 'video-chunk') {
+            console.log(`Received chunk: ${data.offset}/${data.total} bytes`);
             handleVideoChunk(data);
         } else if (data.type === 'video-metadata') {
+            console.log('Received video metadata:', data);
             handleVideoMetadata(data);
         } else if (data.type === 'video-request') {
             console.log('Received video request, isHost:', localStorage.getItem("isHost"));
+            console.log('Video file available:', !!videoFile);
             if (localStorage.getItem("isHost") === "true" && videoFile) {
                 console.log('Starting video stream to peer');
                 startStreamingTo(conn);
+            } else {
+                console.log('Cannot stream: isHost=', localStorage.getItem("isHost"), 'videoFile=', !!videoFile);
             }
         } else if (data.type === 'chat') {
+            append({
+                name: data.username,
+                content: data.message,
+                pfp: data.pfp
+            });
+        }
+    });
+    
+    conn.on('open', () => {
+        console.log('Connection opened to:', conn.peer);
+        if (localStorage.getItem("isHost") !== "true") {
+            console.log('Requesting video from host');
+            conn.send({
+                type: 'video-request'
+            });
+        }
+    });
+
+    conn.on('error', (err) => {
+        console.error('Connection error:', err);
+        notyf.error("Connection error occurred");
+    });
+}
             append({
                 name: data.username,
                 content: data.message,
@@ -205,11 +233,17 @@ function appendData(roomName, roomCode) {
 function onChangeFile() {
     const file = document.getElementById("file-id").files[0];
     if (file) {
+        // Store the actual file object for streaming
         videoFile = file;
+        // Create preview URL for host's video player
         const path = (window.URL || window.webkitURL).createObjectURL(file);
-        localStorage.setItem("videoPath", path);
-        localStorage.setItem("videoSize", file.size);
         videoPlayer.src = path;
+        localStorage.setItem("videoSize", file.size);
+        console.log('Host video file loaded:', {
+            name: file.name,
+            size: file.size,
+            type: file.type
+        });
     }
 }
 
@@ -267,11 +301,17 @@ document.addEventListener("click", function(e) {
         const roomName = document.getElementById("roomname").value;
         const username = document.getElementById("create-username").value;
         
-        if (!roomName || !username || !videoFile) {
-            document.getElementById("createRoomText").innerHTML = "Please fill in all fields and select a video file";
+        if (!roomName || !username) {
+            document.getElementById("createRoomText").innerHTML = "Please fill in all fields";
             return;
         }
         
+        if (!videoFile) {
+            document.getElementById("createRoomText").innerHTML = "Please select a video file";
+            return;
+        }
+        
+        console.log('Creating room with video:', videoFile.name);
         localStorage.setItem("isHost", "true");
         localStorage.setItem("username", username);
         localStorage.setItem("roomName", roomName);
