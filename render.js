@@ -110,17 +110,26 @@ async function startStreamingTo(conn) {
 
         console.log('Starting video stream for peer:', conn.peer);
 
-        // Send metadata first
+        // Get the first few bytes to check video header
+        const headerChunk = await videoFile.slice(0, 4).arrayBuffer();
+        const header = new Uint8Array(headerChunk);
+        console.log('Video header bytes:', Array.from(header));
+
+        // Send metadata first with detailed format info
         conn.send({
             type: 'video-metadata',
             name: videoFile.name,
             size: videoFile.size,
-            type: videoFile.type || 'video/webm'
+            type: videoFile.type,
+            lastModified: videoFile.lastModified,
+            header: Array.from(header) // Send header bytes for format verification
         });
 
         // Stream the chunks
         let offset = 0;
-        while (offset < videoFile.size) {
+        const totalSize = videoFile.size;
+        
+        while (offset < totalSize) {
             const chunk = videoFile.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
             
@@ -128,12 +137,10 @@ async function startStreamingTo(conn) {
                 type: 'video-chunk',
                 data: buffer,
                 offset: offset,
-                total: videoFile.size
+                total: totalSize
             });
             
-            offset += CHUNK_SIZE;
-            
-            // Add a small delay between chunks to prevent overwhelming the connection
+            offset += buffer.byteLength;
             await new Promise(resolve => setTimeout(resolve, 50));
         }
         
@@ -176,17 +183,30 @@ function handleVideoMetadata(data) {
 
 function handleVideoChunk(data) {
     try {
-        receivedChunks.push(new Uint8Array(data.data));
+        // Store the raw ArrayBuffer data
+        receivedChunks.push(data.data);
         receivedSize += data.data.byteLength;
         
-        console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${Math.round(receivedSize/expectedSize*100)}%)`);
+        const percentage = Math.round((receivedSize / data.total) * 100);
+        console.log(`Received chunk: ${receivedSize}/${data.total} bytes (${percentage}%)`);
         
         if (receivedSize === expectedSize) {
             console.log('All chunks received, creating video blob');
-            const blob = new Blob(receivedChunks, { type: videoType });
+            
+            // Convert chunks to Uint8Array before creating blob
+            const fullBuffer = new Uint8Array(receivedSize);
+            let offset = 0;
+            
+            receivedChunks.forEach(chunk => {
+                fullBuffer.set(new Uint8Array(chunk), offset);
+                offset += chunk.byteLength;
+            });
+            
+            const blob = new Blob([fullBuffer], { type: videoType });
             console.log('Created blob:', {
                 size: blob.size,
-                type: blob.type
+                type: blob.type,
+                expectedSize: expectedSize
             });
             
             // Clean up old video source if it exists
@@ -200,12 +220,12 @@ function handleVideoChunk(data) {
             // Verify the video is playable
             videoPlayer.onloadeddata = () => {
                 console.log('Video loaded successfully');
-                notyf.success("Video received successfully");
+                notyf.success("Video received and loaded successfully");
             };
             
             videoPlayer.onerror = (e) => {
                 console.error('Error loading video:', videoPlayer.error);
-                notyf.error("Error loading video: " + videoPlayer.error.message);
+                notyf.error("Error loading video: " + (videoPlayer.error?.message || 'Unknown error'));
             };
             
             receivedChunks = [];
