@@ -42,14 +42,18 @@ function initializePeer(isHost) {
 // Set up peer connection and handle data
 function setupConnection(conn) {
     connections[conn.peer] = conn;
+    console.log('Setting up connection with peer:', conn.peer);
     
     conn.on('data', (data) => {
+        console.log('Received data type:', data.type);
         if (data.type === 'video-chunk') {
             handleVideoChunk(data);
         } else if (data.type === 'video-metadata') {
             handleVideoMetadata(data);
         } else if (data.type === 'video-request') {
-            if (localStorage.getItem("isHost") === "true") {
+            console.log('Received video request, isHost:', localStorage.getItem("isHost"));
+            if (localStorage.getItem("isHost") === "true" && videoFile) {
+                console.log('Starting video stream to peer');
                 startStreamingTo(conn);
             }
         } else if (data.type === 'chat') {
@@ -83,6 +87,12 @@ function setupConnection(conn) {
 // Stream video to peers
 async function startStreamingTo(conn) {
     try {
+        console.log('Starting video stream, file:', videoFile);
+        if (!videoFile) {
+            throw new Error('No video file available');
+        }
+
+        // Send metadata first
         conn.send({
             type: 'video-metadata',
             name: videoFile.name,
@@ -90,24 +100,38 @@ async function startStreamingTo(conn) {
             type: videoFile.type
         });
 
+        console.log('Sent video metadata:', {
+            name: videoFile.name,
+            size: videoFile.size,
+            type: videoFile.type
+        });
+
+        // Start streaming chunks
         let offset = 0;
         while (offset < videoFile.size) {
             const chunk = videoFile.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
             
-            conn.send({
-                type: 'video-chunk',
-                data: buffer,
-                offset: offset,
-                total: videoFile.size
-            });
-            
-            offset += CHUNK_SIZE;
-            await new Promise(resolve => setTimeout(resolve, 10)); // Prevent overwhelming the connection
+            if (conn.open) {
+                conn.send({
+                    type: 'video-chunk',
+                    data: buffer,
+                    offset: offset,
+                    total: videoFile.size
+                });
+                
+                offset += CHUNK_SIZE;
+                await new Promise(resolve => setTimeout(resolve, 10)); // Throttle sending
+            } else {
+                throw new Error('Connection closed during streaming');
+            }
         }
+        
+        console.log('Video streaming completed');
+        notyf.success("Video streaming completed");
     } catch (err) {
         console.error('Error streaming video:', err);
-        notyf.error("Error streaming video");
+        notyf.error("Error streaming video: " + err.message);
     }
 }
 
@@ -267,6 +291,13 @@ document.addEventListener("click", function(e) {
         joinPage.style.display = "block";
     }
     
+    else if (e.target.id === "joinRoomButton") {
+        landingPage.style.display = "none";
+        joinPage.style.display = "block";
+        // Remove file input requirement for joining
+        document.getElementById("join-file-id").style.display = "none";
+    }
+    
     else if (e.target.id === "roomJoinButton") {
         const hostPeerId = document.getElementById("roomCode").value;
         const username = document.getElementById("join-username").value;
@@ -289,6 +320,12 @@ document.addEventListener("click", function(e) {
             conn.on('open', () => {
                 console.log('Connected to host successfully');
                 setupConnection(conn);
+                
+                // Immediately request the video from host
+                conn.send({
+                    type: 'video-request'
+                });
+                
                 document.getElementById("roomCodeText").innerHTML = hostPeerId;
                 joinPage.style.display = "none";
                 document.title = "Local Party | Room";
