@@ -461,11 +461,17 @@ async function processNextSegment() {
     }
 }
 async function processChunkBatch() {
-    if (!sourceBuffer || sourceBuffer.updating) return;
+    if (!sourceBuffer || sourceBuffer.updating) {
+        console.log('Source buffer not ready for processing');
+        return;
+    }
 
     try {
-        // Process up to 5 chunks at a time
-        const batch = pendingChunks.splice(0, 5);
+        // Process up to 3 chunks at a time
+        const batch = pendingChunks.splice(0, 3);
+        if (batch.length === 0) return;
+
+        console.log(`Processing batch of ${batch.length} chunks`);
         const totalLength = batch.reduce((sum, chunk) => sum + chunk.byteLength, 0);
         const combinedChunk = new Uint8Array(totalLength);
         
@@ -475,18 +481,24 @@ async function processChunkBatch() {
             offset += chunk.byteLength;
         }
 
+        console.log(`Appending ${totalLength} bytes to source buffer`);
         sourceBuffer.appendBuffer(combinedChunk);
 
         // Schedule next batch
         sourceBuffer.addEventListener('updateend', () => {
+            console.log('Batch processed successfully');
             if (pendingChunks.length > 0) {
+                console.log(`${pendingChunks.length} chunks remaining`);
                 setTimeout(() => processChunkBatch(), 10);
+            } else {
+                console.log('All chunks processed');
             }
         }, { once: true });
 
     } catch (e) {
+        console.error('Error in processChunkBatch:', e);
         if (e.name === 'QuotaExceededError') {
-            // If we hit quota, remove some early buffer
+            console.log('Quota exceeded, cleaning up old data');
             if (sourceBuffer.buffered.length > 0) {
                 const currentTime = player.currentTime();
                 const start = sourceBuffer.buffered.start(0);
@@ -496,8 +508,6 @@ async function processChunkBatch() {
                 // Put chunks back at the start of pending
                 pendingChunks.unshift(...batch);
             }
-        } else {
-            console.error('Error in processChunkBatch:', e);
         }
     }
 }
@@ -574,44 +584,64 @@ function removeOldBufferData(currentTime) {
 function initializePlayerEvents() {
     if (!player) return;
 
-    // Process chunks on waiting
-player.on('waiting', () => {
-    console.log('Video waiting for data');
-    
-    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-        const currentTime = player.currentTime();
+    player.on('waiting', () => {
+        console.log('Video waiting for data');
         
-        // Log all buffer ranges
-        let hasValidRange = false;
-        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-            const start = sourceBuffer.buffered.start(i);
-            const end = sourceBuffer.buffered.end(i);
-            console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
             
-            if (currentTime >= start && currentTime <= end) {
-                hasValidRange = true;
+            console.log('Current source buffer state:', sourceBuffer.updating ? 'updating' : 'idle');
+            console.log('Pending chunks:', pendingChunks.length);
+            
+            // Log all buffer ranges
+            let hasValidRange = false;
+            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                const start = sourceBuffer.buffered.start(i);
+                const end = sourceBuffer.buffered.end(i);
+                console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+                
+                if (currentTime >= start && currentTime <= end) {
+                    hasValidRange = true;
+                }
+            }
+            
+            // If we have pending chunks, process them regardless of valid range
+            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
+                console.log('Processing pending chunks...');
+                processChunkBatch(); // Use batch processing instead of single chunks
+            } else if (!hasValidRange) {
+                console.log('No valid range for current time:', currentTime);
+            }
+        } else {
+            console.log('No buffered ranges available');
+            // If we have chunks but no buffer, start processing
+            if (pendingChunks.length > 0 && sourceBuffer && !sourceBuffer.updating) {
+                console.log('Starting initial chunk processing...');
+                processChunkBatch();
             }
         }
-        
-        if (!hasValidRange && pendingChunks.length > 0) {
-            console.log('Current time outside buffered ranges, processing more chunks');
-            processNextChunk();
+    });
+
+    // Add canplay handler
+    player.on('canplay', () => {
+        console.log('Video can play - enabling play button');
+        if (player.controlBar && player.controlBar.playToggle) {
+            player.controlBar.playToggle.enable();
         }
-    }
-});
+    });
 
     player.on('error', (error) => {
         console.error('Player error:', error);
+        console.log('Source buffer state:', sourceBuffer ? sourceBuffer.updating : 'no source buffer');
+        console.log('Media source state:', mediaSource ? mediaSource.readyState : 'no media source');
     });
-    // Clean up old buffer data every 30 seconds during playback
+
     player.on('timeupdate', () => {
-        // Only clean up every 30 seconds to avoid too frequent operations
         if (Math.floor(player.currentTime()) % 30 === 0) {
             removeOldBufferData(player.currentTime());
         }
     });
 
-    // Clean up MediaSource on player disposal
     player.on('dispose', () => {
         if (mediaSource && mediaSource.readyState === 'open') {
             mediaSource.endOfStream();
@@ -620,8 +650,16 @@ player.on('waiting', () => {
             URL.revokeObjectURL(mediaState.mediaSourceUrl);
         }
     });
-}
 
+    // Add play handler
+    player.on('play', () => {
+        console.log('Play event triggered');
+        if (pendingChunks.length > 0 && sourceBuffer && !sourceBuffer.updating) {
+            console.log('Processing chunks on play');
+            processChunkBatch();
+        }
+    });
+}
 // Helper function to handle chat messages
 function handleChatMessage(data) {
     append({
