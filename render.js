@@ -404,38 +404,71 @@ function setupConnection(conn) {
                     const chunk = new Uint8Array(data.data);
                     console.log(`Processing chunk ${data.index} of size ${chunk.byteLength} at offset ${data.offset}`);
                 
-                    if (!pendingChunks[data.index]) {
-                        pendingChunks[data.index] = {
-                            data: chunk,
-                            offset: data.offset,
-                            processed: false
-                        };
-                        receivedSize += chunk.byteLength;
-                    }
+                    // Store chunk with metadata
+                    pendingChunks[data.index] = {
+                        data: chunk,
+                        offset: data.offset,
+                        size: chunk.byteLength,
+                        processed: false
+                    };
+                    receivedSize += chunk.byteLength;
                 
-                    // If we have enough sequential chunks, process them
+                    // Process chunks if we can
                     if (sourceBuffer && !sourceBuffer.updating) {
-                        let nextIndexToProcess = 0;
-                        while (pendingChunks[nextIndexToProcess] && !pendingChunks[nextIndexToProcess].processed) {
-                            try {
-                                const nextChunk = pendingChunks[nextIndexToProcess].data;
-                                sourceBuffer.appendBuffer(nextChunk);
-                                pendingChunks[nextIndexToProcess].processed = true;
-                                nextIndexToProcess++;
+                        // Find the next unprocessed chunk in sequence
+                        let nextIndex = 0;
+                        while (pendingChunks[nextIndex]?.processed) {
+                            nextIndex++;
+                        }
                 
-                                // Wait for this append to complete before continuing
+                        // Process sequential chunks
+                        while (pendingChunks[nextIndex] && !sourceBuffer.updating) {
+                            const nextChunk = pendingChunks[nextIndex];
+                            try {
+                                console.log(`Processing sequential chunk ${nextIndex} at offset ${nextChunk.offset}`);
+                                
+                                // If this is not the first chunk, ensure timestamp continuity
+                                if (nextIndex > 0 && sourceBuffer.buffered.length > 0) {
+                                    const lastEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                                    sourceBuffer.timestampOffset = lastEnd;
+                                }
+                
+                                sourceBuffer.appendBuffer(nextChunk.data);
+                                
+                                // Wait for append to complete
                                 await new Promise((resolve, reject) => {
-                                    sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                                    sourceBuffer.addEventListener('error', reject, { once: true });
+                                    const handleUpdateEnd = () => {
+                                        sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                                        sourceBuffer.removeEventListener('error', handleError);
+                                        resolve();
+                                    };
+                
+                                    const handleError = (err) => {
+                                        sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                                        sourceBuffer.removeEventListener('error', handleError);
+                                        reject(err);
+                                    };
+                
+                                    sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+                                    sourceBuffer.addEventListener('error', handleError);
                                 });
                 
+                                // Mark as processed and log buffer state
+                                nextChunk.processed = true;
                                 if (sourceBuffer.buffered.length > 0) {
-                                    console.log(`Buffer after chunk ${nextIndexToProcess}:`, 
-                                        sourceBuffer.buffered.start(0), '-', 
-                                        sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1));
+                                    for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                                        console.log(`Buffer after chunk ${nextIndex} - Range ${i}: ` +
+                                            `${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                                    }
                                 }
+                
+                                nextIndex++;
                             } catch (e) {
-                                console.error('Error processing chunk:', e);
+                                if (e.name === 'QuotaExceededError') {
+                                    await handleQuotaExceeded();
+                                    continue;
+                                }
+                                console.error(`Error processing chunk ${nextIndex}:`, e);
                                 break;
                             }
                         }
