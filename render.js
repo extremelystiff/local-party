@@ -37,10 +37,20 @@ const mediaQueue = {
     mediaSourceBuffer: null,
     
     async addChunk(chunk) {
-        // Ensure chunk is a Uint8Array
-        if (!(chunk instanceof Uint8Array)) {
-            console.error('Invalid chunk format:', chunk);
-            return;
+        // Create new MediaSource if needed
+        if (!mediaSource || mediaSource.readyState === 'closed') {
+            console.log('Creating new MediaSource for chunk processing');
+            mediaSource = new MediaSource();
+            const videoElement = document.querySelector('#video-player_html5_api');
+            videoElement.src = URL.createObjectURL(mediaSource);
+            
+            await new Promise(resolve => {
+                mediaSource.addEventListener('sourceopen', resolve, { once: true });
+            });
+
+            // Create new SourceBuffer
+            sourceBuffer = mediaSource.addSourceBuffer('video/webm;codecs="vp8,vorbis"');
+            sourceBuffer.mode = 'sequence';
         }
         
         this.chunks.push(chunk);
@@ -49,75 +59,79 @@ const mediaQueue = {
         }
     },
 
-async processQueue() {
-    if (this.isProcessing || this.chunks.length === 0) return;
-    
-    this.isProcessing = true;
-    console.log(`Processing queue with ${this.chunks.length} chunks`);
+    async processQueue() {
+        if (this.isProcessing || this.chunks.length === 0) return;
+        
+        this.isProcessing = true;
+        console.log(`Processing queue with ${this.chunks.length} chunks`);
 
-    try {
-        for (const chunk of this.chunks) {
-            if (!sourceBuffer || sourceBuffer.updating) {
-                await new Promise(resolve => {
-                    sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                });
+        try {
+            // Wait for sourceBuffer to be ready
+            while (sourceBuffer && sourceBuffer.updating) {
+                await new Promise(resolve => setTimeout(resolve, 10));
             }
 
-            // Set timestamp offset to maintain continuity
-            if (sourceBuffer.buffered.length > 0) {
-                const lastEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                sourceBuffer.timestampOffset = lastEnd;
-            }
+            // Process each chunk
+            for (const chunk of this.chunks) {
+                if (!sourceBuffer || mediaSource.readyState !== 'open') {
+                    console.log('MediaSource or SourceBuffer not ready, stopping processing');
+                    break;
+                }
 
-            sourceBuffer.appendBuffer(chunk);
-            
-            // Wait for append to complete
-            await new Promise((resolve, reject) => {
-                const handleUpdateEnd = () => {
-                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                    sourceBuffer.removeEventListener('error', handleError);
-                    
-                    if (sourceBuffer.buffered.length > 0) {
-                        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                            console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
-                        }
+                try {
+                    sourceBuffer.appendBuffer(chunk);
+                    await new Promise((resolve, reject) => {
+                        const handleUpdateEnd = () => {
+                            sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                            sourceBuffer.removeEventListener('error', handleError);
+                            
+                            // Log buffer state
+                            if (sourceBuffer.buffered.length > 0) {
+                                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                                    console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
+                                }
+                            }
+                            resolve();
+                        };
+
+                        const handleError = (err) => {
+                            sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                            sourceBuffer.removeEventListener('error', handleError);
+                            reject(err);
+                        };
+
+                        sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+                        sourceBuffer.addEventListener('error', handleError);
+                    });
+                } catch (e) {
+                    if (e.name === 'QuotaExceededError') {
+                        await this.handleQuotaExceeded();
+                        // Retry this chunk
+                        continue;
+                    } else {
+                        throw e;
                     }
-                    resolve();
-                };
+                }
+            }
 
-                const handleError = (err) => {
-                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                    sourceBuffer.removeEventListener('error', handleError);
-                    reject(err);
-                };
+            // Clear processed chunks
+            this.chunks = [];
 
-                sourceBuffer.addEventListener('updateend', handleUpdateEnd);
-                sourceBuffer.addEventListener('error', handleError);
-            });
+        } catch (e) {
+            console.error('Error in queue processing:', e);
+        } finally {
+            this.isProcessing = false;
         }
-
-        // Clear processed chunks
-        this.chunks = [];
-
-    } catch (e) {
-        console.error('Error in queue processing:', e);
-        if (e.name === 'QuotaExceededError') {
-            await this.handleQuotaExceeded();
-        }
-    } finally {
-        this.isProcessing = false;
-    }
-},
-
+    },
 
     async handleQuotaExceeded() {
         if (!sourceBuffer || !sourceBuffer.buffered.length) return;
         
         const currentTime = player.currentTime();
         const start = sourceBuffer.buffered.start(0);
-        const removeEnd = Math.max(start, currentTime - 10);
+        const removeEnd = Math.max(start, currentTime - 5);
         
-        await new Promise((resolve) => {
+        await new Promise(resolve => {
             sourceBuffer.remove(start, removeEnd);
             sourceBuffer.addEventListener('updateend', resolve, { once: true });
         });
@@ -233,16 +247,20 @@ function setupConnection(conn) {
     const videoElement = document.querySelector('#video-player_html5_api');
 
     // Helper function to request missing chunks
-    const requestMissingChunks = (startTime, endTime) => {
-        if (!isHost) {
-            console.log(`Requesting chunks for time range: ${startTime} to ${endTime}`);
-            conn.send({
-                type: 'chunk-request',
-                startTime: startTime,
-                endTime: endTime
-            });
-        }
-    };
+        const requestMissingChunks = (startTime, endTime) => {
+            if (!isHost) {
+                console.log(`Requesting chunks for time range: ${startTime} to ${endTime}`);
+                // Add debounce to prevent rapid requests
+                clearTimeout(requestTimeout);
+                requestTimeout = setTimeout(() => {
+                    conn.send({
+                        type: 'chunk-request',
+                        startTime: startTime,
+                        endTime: endTime
+                    });
+                }, 1000);
+            }
+        };
 
     // Helper function to set up buffer monitoring
     const setupBufferMonitoring = () => {
