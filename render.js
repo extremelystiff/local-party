@@ -267,34 +267,25 @@ function setupConnection(conn) {
     const setupBufferMonitoring = () => {
         if (!player || !sourceBuffer) return;
 
-        player.on('waiting', () => {
-            if (sourceBuffer.buffered.length > 0) {
-                const currentTime = player.currentTime();
-                let hasValidRange = false;
-
-                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                    const start = sourceBuffer.buffered.start(i);
-                    const end = sourceBuffer.buffered.end(i);
-                    
-                    if (currentTime >= start && currentTime <= end) {
-                        hasValidRange = true;
-                        break;
-                    }
-                }
-
-                if (!hasValidRange) {
-                    // Find the closest buffered range and request missing chunks
-                    let closestEnd = 0;
-                    for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                        const end = sourceBuffer.buffered.end(i);
-                        if (end < currentTime && end > closestEnd) {
-                            closestEnd = end;
-                        }
-                    }
-                    requestMissingChunks(closestEnd, currentTime + 10);
-                }
+player.on('waiting', () => {
+    console.log('Video waiting for data');
+    
+    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+        const currentTime = player.currentTime();
+        console.log(`Current time: ${currentTime}`);
+        
+        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+            const start = sourceBuffer.buffered.start(i);
+            const end = sourceBuffer.buffered.end(i);
+            console.log(`Buffer range ${i}: ${start} to ${end}`);
+            
+            if (currentTime < end) {
+                console.log('Should have data, trying to resume');
+                player.play().catch(e => console.error('Resume failed:', e));
             }
-        });
+        }
+    }
+});
     };
 
     conn.on('data', async (data) => {
@@ -306,52 +297,41 @@ case 'video-metadata':
     console.log('Processing metadata:', data);
     expectedSize = data.size;
     
-    // Reset state
-    pendingChunks = {};
-    receivedSize = 0;
-
     try {
         // Clean up existing MediaSource
         if (mediaSource) {
             if (mediaSource.readyState === 'open') {
                 mediaSource.endOfStream();
             }
-            if (mediaState.mediaSourceUrl) {
-                URL.revokeObjectURL(mediaState.mediaSourceUrl);
-            }
             mediaSource = null;
             sourceBuffer = null;
         }
 
-        // Create new MediaSource and wait for it to open
+        // Create new MediaSource
         mediaSource = new MediaSource();
         const mediaUrl = URL.createObjectURL(mediaSource);
-        videoElement.src = mediaUrl;
-
-        await new Promise((resolve) => {
-            mediaSource.addEventListener('sourceopen', async () => {
-                try {
-                    let mimeType = data.mimeType;
-                    if (data.mimeType === 'video/webm') {
-                        mimeType = 'video/webm;codecs="vp8,vorbis"';
-                    }
-
-                    sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                    sourceBuffer.mode = 'sequence';
-                    sourceBuffer.timestampOffset = 0;
-
-                    // Now it's safe to set duration
-                    mediaSource.duration = 14.5;
-                    mediaSourceReady = true;
-                    resolve();
-                } catch (e) {
-                    console.error('Error in sourceopen:', e);
+        
+        await new Promise(resolve => {
+            mediaSource.addEventListener('sourceopen', () => {
+                let mimeType = data.mimeType;
+                if (data.mimeType === 'video/webm') {
+                    mimeType = 'video/webm;codecs="vp8,vorbis"';
                 }
+                
+                sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+                sourceBuffer.mode = 'segments';  // Try segments instead of sequence
+                mediaSourceReady = true;
+                resolve();
             }, { once: true });
+            
+            videoElement.src = mediaUrl;
         });
+        
+        pendingChunks = {};
+        receivedSize = 0;
 
     } catch (error) {
-        console.error('Error setting up MediaSource:', error);
+        console.error('Error in metadata setup:', error);
     }
     break;
                     
@@ -415,18 +395,29 @@ case 'video-complete':
             console.log(`Added chunk ${i}, new offset: ${offset}`);
         }
 
-        // Verify total size
         console.log(`Final buffer size: ${combinedBuffer.byteLength}, expected: ${expectedSize}`);
         if (combinedBuffer.byteLength !== expectedSize) {
             throw new Error('Size mismatch in final buffer');
         }
 
-        // Append the whole thing at once
-        sourceBuffer.appendBuffer(combinedBuffer);
-        console.log('Appended combined buffer to source');
+        // Append and wait for completion
+        await new Promise((resolve, reject) => {
+            sourceBuffer.addEventListener('updateend', () => {
+                if (sourceBuffer.buffered.length > 0) {
+                    const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                    console.log(`Full buffer range: 0 to ${end}`);
+                    
+                    // Keep buffer for potential gap filling
+                    // pendingChunks = combinedBuffer;
+                }
+                resolve();
+            }, { once: true });
 
-        // Clear chunks
-        pendingChunks = {};
+            sourceBuffer.addEventListener('error', reject, { once: true });
+            sourceBuffer.appendBuffer(combinedBuffer);
+        });
+
+        console.log('Video assembly complete');
         
     } catch (e) {
         console.error('Error assembling video:', e);
