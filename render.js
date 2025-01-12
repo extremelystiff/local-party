@@ -385,10 +385,18 @@ function setupConnection(conn) {
 
                 case 'video-complete':
                     console.log('Video transfer complete, combining chunks...');
-                    if (!sourceBuffer || sourceBuffer.updating) {
-                        console.log('Source buffer not ready, waiting...');
+                    
+                    // Wait for MediaSource to be ready
+                    if (!mediaSourceReady) {
                         await new Promise(resolve => {
-                            sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                            const checkReady = () => {
+                                if (mediaSourceReady && sourceBuffer && mediaSource.readyState === 'open') {
+                                    resolve();
+                                } else {
+                                    setTimeout(checkReady, 100);
+                                }
+                            };
+                            checkReady();
                         });
                     }
                 
@@ -399,30 +407,46 @@ function setupConnection(conn) {
                 
                         console.log(`Assembling ${sortedChunks.length} chunks in sequence`);
                 
-                        // Process chunks in sequence
-                        for (const chunk of sortedChunks) {
-                            // If not first chunk, set timestamp offset
-                            if (sourceBuffer.buffered.length > 0) {
-                                const lastEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                                sourceBuffer.timestampOffset = lastEnd;
-                            }
+                        // Combine all chunks into one buffer for continuous playback
+                        const totalSize = sortedChunks.reduce((sum, chunk) => sum + chunk.size, 0);
+                        const combinedBuffer = new Uint8Array(totalSize);
+                        let offset = 0;
                 
-                            // Append chunk and wait for it to complete
-                            sourceBuffer.appendBuffer(chunk.data);
-                            await new Promise(resolve => {
-                                sourceBuffer.addEventListener('updateend', () => {
-                                    if (sourceBuffer.buffered.length > 0) {
-                                        const start = sourceBuffer.buffered.start(sourceBuffer.buffered.length - 1);
-                                        const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                                        console.log(`Buffer after chunk ${chunk.index}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-                                    }
-                                    resolve();
-                                }, { once: true });
-                            });
+                        for (const chunk of sortedChunks) {
+                            combinedBuffer.set(new Uint8Array(chunk.data), offset);
+                            offset += chunk.size;
                         }
                 
+                        // Append the entire buffer at once
+                        console.log(`Appending combined buffer of ${totalSize} bytes`);
+                        sourceBuffer.appendBuffer(combinedBuffer);
+                
+                        // Wait for append to complete
+                        await new Promise((resolve, reject) => {
+                            const handleUpdateEnd = () => {
+                                sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                                sourceBuffer.removeEventListener('error', handleError);
+                
+                                if (sourceBuffer.buffered.length > 0) {
+                                    const start = sourceBuffer.buffered.start(0);
+                                    const end = sourceBuffer.buffered.end(0);
+                                    console.log(`Final buffer range: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+                                }
+                                resolve();
+                            };
+                
+                            const handleError = (err) => {
+                                sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                                sourceBuffer.removeEventListener('error', handleError);
+                                reject(err);
+                            };
+                
+                            sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+                            sourceBuffer.addEventListener('error', handleError);
+                        });
+                
                         // Clear pending chunks
-                        pendingChunks = {};
+                        pendingChunks = [];
                         console.log('All chunks assembled successfully');
                 
                     } catch (e) {
