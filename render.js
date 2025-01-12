@@ -29,7 +29,8 @@ let expectedSize = 0;
 let videoType = '';
 let currentTimestamp = 0;
 let lastAppendedEnd = 0;
-let storedChunks = []; // For host to store chunks with their time ranges
+let storedChunks = [];// For host to store chunks with their time ranges
+let requestTimeout = null;  
 
 const mediaQueue = {
     chunks: [],
@@ -399,31 +400,47 @@ function setupConnection(conn) {
                     }
                     break;
 
-                    case 'video-chunk':
-                        const chunk = new Uint8Array(data.data);
-                        console.log(`Processing chunk ${data.index} of size ${chunk.byteLength}`);
-                    
-                        try {
-                            if (sourceBuffer && !sourceBuffer.updating) {
-                                await mediaQueue.addChunk(chunk);
-                                
-                                // Check if we need more chunks
+                case 'video-chunk':
+                    const chunk = new Uint8Array(data.data);
+                    console.log(`Processing chunk ${data.index} of size ${chunk.byteLength} at offset ${data.offset}`);
+                
+                    if (!pendingChunks[data.index]) {
+                        pendingChunks[data.index] = {
+                            data: chunk,
+                            offset: data.offset,
+                            processed: false
+                        };
+                        receivedSize += chunk.byteLength;
+                    }
+                
+                    // If we have enough sequential chunks, process them
+                    if (sourceBuffer && !sourceBuffer.updating) {
+                        let nextIndexToProcess = 0;
+                        while (pendingChunks[nextIndexToProcess] && !pendingChunks[nextIndexToProcess].processed) {
+                            try {
+                                const nextChunk = pendingChunks[nextIndexToProcess].data;
+                                sourceBuffer.appendBuffer(nextChunk);
+                                pendingChunks[nextIndexToProcess].processed = true;
+                                nextIndexToProcess++;
+                
+                                // Wait for this append to complete before continuing
+                                await new Promise((resolve, reject) => {
+                                    sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                                    sourceBuffer.addEventListener('error', reject, { once: true });
+                                });
+                
                                 if (sourceBuffer.buffered.length > 0) {
-                                    const currentTime = player.currentTime();
-                                    const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                                    
-                                    if (bufferedEnd - currentTime < 5) { // Request more if less than 5 seconds ahead
-                                        requestMissingChunks(bufferedEnd, bufferedEnd + 10);
-                                    }
+                                    console.log(`Buffer after chunk ${nextIndexToProcess}:`, 
+                                        sourceBuffer.buffered.start(0), '-', 
+                                        sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1));
                                 }
-                            } else {
-                                pendingChunks.push(chunk);
+                            } catch (e) {
+                                console.error('Error processing chunk:', e);
+                                break;
                             }
-                            receivedSize += chunk.byteLength;
-                        } catch (e) {
-                            console.error('Error processing chunk:', e);
                         }
-                        break;
+                    }
+                    break;
 
                 case 'video-complete':
                     console.log('Video transfer complete');
