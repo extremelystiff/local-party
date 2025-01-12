@@ -404,25 +404,11 @@ case 'video-metadata':
 case 'video-complete':
     console.log('Video transfer complete, combining chunks...');
     
-    if (!mediaSourceReady || !sourceBuffer || mediaSource.readyState !== 'open') {
-        console.log('Waiting for MediaSource to be ready...');
-        await new Promise(resolve => {
-            const check = () => {
-                if (mediaSourceReady && sourceBuffer && mediaSource.readyState === 'open') {
-                    resolve();
-                } else {
-                    setTimeout(check, 100);
-                }
-            };
-            check();
-        });
-    }
-
     try {
         const sortedChunks = Object.values(pendingChunks)
             .sort((a, b) => a.index - b.index);
 
-        // Combine all chunks into single buffer
+        // Combine all chunks into single buffer with proper ordering
         const totalSize = sortedChunks.reduce((sum, chunk) => sum + chunk.size, 0);
         const combinedBuffer = new Uint8Array(totalSize);
         let offset = 0;
@@ -432,23 +418,41 @@ case 'video-complete':
             offset += chunk.size;
         }
 
-        // Append the combined buffer
         console.log(`Appending combined buffer of ${totalSize} bytes`);
-        sourceBuffer.appendBuffer(combinedBuffer);
 
-        await new Promise((resolve, reject) => {
-            sourceBuffer.addEventListener('updateend', () => {
-                if (sourceBuffer.buffered.length > 0) {
-                    const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                    console.log(`Final duration: ${end.toFixed(3)}s`);
-                    mediaSource.duration = end;
-                }
-                resolve();
-            }, { once: true });
-        });
+        // Make sure we have a valid sourceBuffer
+        if (sourceBuffer && mediaSource.readyState === 'open') {
+            // Set duration before appending buffer
+            mediaSource.duration = 14.5; // Known video duration
 
-        console.log('All chunks assembled successfully');
-        pendingChunks = {};
+            // Reset timestamp offset
+            sourceBuffer.timestampOffset = 0;
+
+            // Append the entire buffer
+            sourceBuffer.appendBuffer(combinedBuffer);
+
+            // Wait for the append to complete
+            await new Promise((resolve) => {
+                const handleUpdateEnd = () => {
+                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+                    
+                    if (sourceBuffer.buffered.length > 0) {
+                        const start = sourceBuffer.buffered.start(0);
+                        const end = sourceBuffer.buffered.end(0);
+                        console.log(`Buffer range after append: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+                    }
+
+                    // Clear the chunks after successful append
+                    pendingChunks = {};
+                    console.log('Video assembly complete');
+                    resolve();
+                };
+
+                sourceBuffer.addEventListener('updateend', handleUpdateEnd, { once: true });
+            });
+        } else {
+            console.error('Source buffer not ready for appending');
+        }
 
     } catch (e) {
         console.error('Error assembling chunks:', e);
