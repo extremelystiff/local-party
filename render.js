@@ -305,11 +305,12 @@ function setupConnection(conn) {
                 case 'video-metadata':
                     console.log('Processing metadata:', data);
                     expectedSize = data.size;
-                    duration = data.duration;
-                    lastAppendedEnd = 0
-                    bytesPerSecond = data.size / data.duration;
                     
-                    // Reset previous MediaSource
+                    // Reset state
+                    pendingChunks = {};  // Change to object for easier index tracking
+                    receivedSize = 0;
+                
+                    // Clean up existing MediaSource
                     if (mediaSource) {
                         if (mediaSource.readyState === 'open') {
                             mediaSource.endOfStream();
@@ -317,55 +318,23 @@ function setupConnection(conn) {
                         mediaSource = null;
                         sourceBuffer = null;
                     }
-
+                
+                    // Create new MediaSource
                     mediaSource = new MediaSource();
                     videoElement.src = URL.createObjectURL(mediaSource);
                     
                     mediaSource.addEventListener('sourceopen', () => {
-                        try {
-                            let mimeType = data.mimeType;
-                            if (data.mimeType === 'video/webm') {
-                                mimeType = 'video/webm;codecs="vp8,vorbis"';
-                            }
-                            
-                            sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                            sourceBuffer.mode = 'sequence';
-                            sourceBuffer.timestampOffset = 0;
-                            
-                            sourceBuffer.addEventListener('updateend', async () => {
-                                if (!mediaSourceReady) {
-                                    mediaSourceReady = true;
-                                    console.log('MediaSource ready for chunks');
-                                    setupBufferMonitoring();
-                                }
-                                
-                                // Process next chunk if available
-                                if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                                    const nextChunk = pendingChunks[0];
-                                    try {
-                                        sourceBuffer.appendBuffer(nextChunk.data);
-                                        pendingChunks.shift();
-
-                                        // Enable playback if we have enough buffer
-                                        if (sourceBuffer.buffered.length > 0) {
-                                            const bufferedEnd = sourceBuffer.buffered.end(0);
-                                            if (bufferedEnd > 3 && player.paused()) {
-                                                player.controlBar.playToggle.enable();
-                                            }
-                                        }
-                                    } catch (e) {
-                                        if (e.name === 'QuotaExceededError') {
-                                            await handleQuotaExceeded();
-                                        }
-                                    }
-                                }
-                            });
-
-                            metadataInitialized = true;
-                        } catch (e) {
-                            console.error('Error in sourceopen:', e);
+                        let mimeType = data.mimeType;
+                        if (data.mimeType === 'video/webm') {
+                            mimeType = 'video/webm;codecs="vp8,vorbis"';
                         }
-                    });
+                
+                        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+                        sourceBuffer.mode = 'sequence';  // Important for sequence
+                        sourceBuffer.timestampOffset = 0;
+                
+                        mediaSourceReady = true;
+                    }, { once: true });
                     break;
                     
                 case 'chunk-request':
@@ -405,19 +374,41 @@ function setupConnection(conn) {
                     console.log(`Processing chunk ${data.index} of size ${chunk.byteLength} at offset ${data.offset}`);
                 
                     // Store chunk with metadata
-                    if (!pendingChunks[data.index]) {
-                        pendingChunks[data.index] = {
-                            data: chunk,
-                            offset: data.offset,
-                            size: chunk.byteLength,
-                            processed: false
-                        };
-                        receivedSize += chunk.byteLength;
-                    }
+                    pendingChunks[data.index] = {
+                        data: chunk,
+                        offset: data.offset,
+                        size: chunk.byteLength,
+                        index: data.index
+                    };
+                    receivedSize += chunk.byteLength;
                 
-                    // Process chunks if we can
-                    if (sourceBuffer && !sourceBuffer.updating && mediaSourceReady) {
-                        await processChunkBatch();
+                    // If all chunks received, assemble in sequence
+                    if (data.type === 'video-complete' || receivedSize >= expectedSize) {
+                        if (!sourceBuffer || sourceBuffer.updating) return;
+                
+                        // Sort chunks by index to ensure proper sequence
+                        const sortedChunks = Object.values(pendingChunks)
+                            .sort((a, b) => a.index - b.index);
+                
+                        // Combine all chunks into one buffer
+                        const totalSize = sortedChunks.reduce((sum, chunk) => sum + chunk.size, 0);
+                        const combinedBuffer = new Uint8Array(totalSize);
+                        let offset = 0;
+                
+                        for (const chunk of sortedChunks) {
+                            combinedBuffer.set(chunk.data, offset);
+                            offset += chunk.size;
+                        }
+                
+                        // Append the combined buffer
+                        try {
+                            sourceBuffer.appendBuffer(combinedBuffer);
+                        } catch (e) {
+                            console.error('Error appending combined buffer:', e);
+                        }
+                
+                        // Clear pending chunks
+                        pendingChunks = [];
                     }
                     break;
 
