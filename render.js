@@ -387,75 +387,49 @@ case 'video-metadata':
                     }
                     break;
 
-                case 'video-chunk':
-                    const chunk = new Uint8Array(data.data);
-                    console.log(`Processing chunk ${data.index} of size ${chunk.byteLength} at offset ${data.offset}`);
-                
-                    // Store chunk
-                    pendingChunks[data.index] = {
-                        data: chunk,
-                        offset: data.offset,
-                        size: chunk.byteLength,
-                        index: data.index
-                    };
-                    receivedSize += chunk.byteLength;
-                    break;
+case 'video-chunk':
+    const chunk = new Uint8Array(data.data);
+    console.log(`Received chunk ${data.index} of size ${chunk.byteLength} at offset ${data.offset}`);
+
+    // Store chunk
+    pendingChunks[data.index] = chunk;
+    receivedSize += chunk.byteLength;
+    break;
 
 case 'video-complete':
-    console.log('Video transfer complete, combining chunks...');
+    console.log('Video transfer complete, assembling chunks...');
     
     try {
-        const sortedChunks = Object.values(pendingChunks)
-            .sort((a, b) => a.index - b.index);
+        // Make sure all chunks are present
+        const numChunks = Object.keys(pendingChunks).length;
+        console.log(`Assembling ${numChunks} chunks into final video...`);
 
-        // Combine all chunks into single buffer with proper ordering
-        const totalSize = sortedChunks.reduce((sum, chunk) => sum + chunk.size, 0);
-        const combinedBuffer = new Uint8Array(totalSize);
+        // Combine chunks in order
+        const combinedBuffer = new Uint8Array(receivedSize);
         let offset = 0;
-
-        for (const chunk of sortedChunks) {
-            combinedBuffer.set(new Uint8Array(chunk.data), offset);
-            offset += chunk.size;
+        
+        for (let i = 0; i < numChunks; i++) {
+            const chunk = pendingChunks[i];
+            combinedBuffer.set(chunk, offset);
+            offset += chunk.byteLength;
+            console.log(`Added chunk ${i}, new offset: ${offset}`);
         }
 
-        console.log(`Appending combined buffer of ${totalSize} bytes`);
-
-        // Make sure we have a valid sourceBuffer
-        if (sourceBuffer && mediaSource.readyState === 'open') {
-            // Set duration before appending buffer
-            mediaSource.duration = 14.5; // Known video duration
-
-            // Reset timestamp offset
-            sourceBuffer.timestampOffset = 0;
-
-            // Append the entire buffer
-            sourceBuffer.appendBuffer(combinedBuffer);
-
-            // Wait for the append to complete
-            await new Promise((resolve) => {
-                const handleUpdateEnd = () => {
-                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                    
-                    if (sourceBuffer.buffered.length > 0) {
-                        const start = sourceBuffer.buffered.start(0);
-                        const end = sourceBuffer.buffered.end(0);
-                        console.log(`Buffer range after append: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-                    }
-
-                    // Clear the chunks after successful append
-                    pendingChunks = {};
-                    console.log('Video assembly complete');
-                    resolve();
-                };
-
-                sourceBuffer.addEventListener('updateend', handleUpdateEnd, { once: true });
-            });
-        } else {
-            console.error('Source buffer not ready for appending');
+        // Verify total size
+        console.log(`Final buffer size: ${combinedBuffer.byteLength}, expected: ${expectedSize}`);
+        if (combinedBuffer.byteLength !== expectedSize) {
+            throw new Error('Size mismatch in final buffer');
         }
 
+        // Append the whole thing at once
+        sourceBuffer.appendBuffer(combinedBuffer);
+        console.log('Appended combined buffer to source');
+
+        // Clear chunks
+        pendingChunks = {};
+        
     } catch (e) {
-        console.error('Error assembling chunks:', e);
+        console.error('Error assembling video:', e);
     }
     break;
 
