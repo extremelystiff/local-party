@@ -373,7 +373,7 @@ function setupConnection(conn) {
                     const chunk = new Uint8Array(data.data);
                     console.log(`Processing chunk ${data.index} of size ${chunk.byteLength} at offset ${data.offset}`);
                 
-                    // Store chunk with metadata
+                    // Store chunk
                     pendingChunks[data.index] = {
                         data: chunk,
                         offset: data.offset,
@@ -381,39 +381,53 @@ function setupConnection(conn) {
                         index: data.index
                     };
                     receivedSize += chunk.byteLength;
-                
-                    // If all chunks received, assemble in sequence
-                    if (data.type === 'video-complete' || receivedSize >= expectedSize) {
-                        if (!sourceBuffer || sourceBuffer.updating) return;
-                
-                        // Sort chunks by index to ensure proper sequence
-                        const sortedChunks = Object.values(pendingChunks)
-                            .sort((a, b) => a.index - b.index);
-                
-                        // Combine all chunks into one buffer
-                        const totalSize = sortedChunks.reduce((sum, chunk) => sum + chunk.size, 0);
-                        const combinedBuffer = new Uint8Array(totalSize);
-                        let offset = 0;
-                
-                        for (const chunk of sortedChunks) {
-                            combinedBuffer.set(chunk.data, offset);
-                            offset += chunk.size;
-                        }
-                
-                        // Append the combined buffer
-                        try {
-                            sourceBuffer.appendBuffer(combinedBuffer);
-                        } catch (e) {
-                            console.error('Error appending combined buffer:', e);
-                        }
-                
-                        // Clear pending chunks
-                        pendingChunks = [];
-                    }
                     break;
 
                 case 'video-complete':
-                    console.log('Video transfer complete');
+                    console.log('Video transfer complete, combining chunks...');
+                    if (!sourceBuffer || sourceBuffer.updating) {
+                        console.log('Source buffer not ready, waiting...');
+                        await new Promise(resolve => {
+                            sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                        });
+                    }
+                
+                    try {
+                        // Sort chunks by index
+                        const sortedChunks = Object.values(pendingChunks)
+                            .sort((a, b) => a.index - b.index);
+                
+                        console.log(`Assembling ${sortedChunks.length} chunks in sequence`);
+                
+                        // Process chunks in sequence
+                        for (const chunk of sortedChunks) {
+                            // If not first chunk, set timestamp offset
+                            if (sourceBuffer.buffered.length > 0) {
+                                const lastEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                                sourceBuffer.timestampOffset = lastEnd;
+                            }
+                
+                            // Append chunk and wait for it to complete
+                            sourceBuffer.appendBuffer(chunk.data);
+                            await new Promise(resolve => {
+                                sourceBuffer.addEventListener('updateend', () => {
+                                    if (sourceBuffer.buffered.length > 0) {
+                                        const start = sourceBuffer.buffered.start(sourceBuffer.buffered.length - 1);
+                                        const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                                        console.log(`Buffer after chunk ${chunk.index}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+                                    }
+                                    resolve();
+                                }, { once: true });
+                            });
+                        }
+                
+                        // Clear pending chunks
+                        pendingChunks = {};
+                        console.log('All chunks assembled successfully');
+                
+                    } catch (e) {
+                        console.error('Error assembling chunks:', e);
+                    }
                     break;
 
                 case 'video-request':
