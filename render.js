@@ -913,6 +913,9 @@ function getVideoMimeType(file) {
             case 'webm':
                 mimeType = 'video/webm; codecs="vp8, vorbis"';
                 break;
+             case 'webmvp9':
+               mimeType = 'video/webm; codecs="vp9, opus"';
+                break;
             case 'ogg':
                 mimeType = 'video/ogg; codecs="theora, vorbis"';
                 break;
@@ -930,13 +933,14 @@ function getVideoMimeType(file) {
                 break;
             default:
                 // Default to MP4 if we can't detect
-                mimeType = 'video/mp4';
+                mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
         }
     }
     
     console.log('Detected MIME type:', mimeType, 'for file:', file.name);
     return mimeType;
 }
+
 
 // Update startStreamingTo to use proper MIME type
 async function startStreamingTo(conn) {
