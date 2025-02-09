@@ -565,8 +565,8 @@
     }
     function setupSourceBuffer(mimeType) {
         if (!mediaSource || mediaSource.readyState !== 'open') return;
-
-        try {
+    
+        try { // Start of try block
             if (mimeType === 'video/webm') {
                 if (mimeType.includes('av01')) {
                     mimeType = mimeType;
@@ -574,23 +574,27 @@
                     mimeType = 'video/webm;codecs="vp8,vorbis"';
                 }
             }
-
+    
             sourceBuffer = mediaSource.addSourceBuffer(mimeType);
             sourceBuffer.mode = 'sequence';
             sourceBuffer.timestampOffset = 0;
             console.log('Created source buffer in segments mode');
             sourceBuffer.timestampOffset = 0;
-
+    
             sourceBuffer.addEventListener('updateend', () => {
                 if (sourceBuffer.buffered.length > 0) {
                     for (let i = 0; i < sourceBuffer.buffered.length; i++) {
                         console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
                     }
                 }
-            }
-        });
-
-        mediaState.isReady = true;
+            });
+    
+            mediaState.isReady = true;
+    
+        } catch (e) { // Catch block to handle errors
+            console.error('Error setting up source buffer:', e);
+            mediaState.hasError = true;
+        } // End of try-catch block
     }
     function handleVideoComplete() {
         console.log('Video transfer complete');
