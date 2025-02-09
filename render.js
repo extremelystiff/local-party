@@ -132,10 +132,16 @@ function setupConnection(conn) {
         dataChannel.onclose = () => { console.log(`Data channel closed to ${conn.peer}`); };
         dataChannel.onerror = (error) => { console.error(`Data channel error to ${conn.peer}:`, error); };
         dataChannel.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'live-video-chunk') {
-                handleVideoChunk({ data: data.data });
-            }
+            console.log("PEER/HOST: dataChannel.onmessage handler executed! Raw data:", event.data); // Added log - VERY IMPORTANT!
+        
+            // Simplified chat message handling - just log the raw message to console
+            console.log("PEER/HOST: Chat Message Received (Raw):", event.data); // Basic chat log - raw data
+        
+            // **Comment out video chunk handling completely for now:**
+            // const data = JSON.parse(event.data);
+            // if (data.type === 'live-video-chunk') {
+            //     handleVideoChunk({ data: data.data });
+            // }
         };
 
     conn.on('open', () => {
@@ -1360,7 +1366,7 @@ function handleRoomCreate() {
     document.title = `Local Party | ${roomName}`;
     roomPage.style.display = "block";
 
-    appendData(roomName, peer.id);
+   // appendData(roomName, peer.id);
 }
 
 function handleRoomJoin() {
@@ -1392,7 +1398,7 @@ function handleRoomJoin() {
             joinPage.style.display = "none";
             document.title = "Local Party | Room";
             roomPage.style.display = "block";
-            appendData("Room", hostPeerId);
+            //appendData("Room", hostPeerId);
         });
 
         conn.on('error', (err) => {
@@ -1410,24 +1416,21 @@ form.addEventListener('submit', (e) => {
     const message = messageInput.value.trim();
 
     if (message) {
-        const chatData = {
-            type: 'chat',
-            username: localStorage.getItem("username"),
-            message: message,
-            pfp: localStorage.getItem("pfpUrl") || "#f3dfbf"
-        };
-
+        // Simplified chat message sending - send plain text directly
         Object.values(connections).forEach(conn => {
-            if (conn.open) {
-                conn.send(chatData);
+            if (conn.dataChannel && conn.dataChannel.readyState === 'open') { // Ensure dataChannel exists and is open
+                conn.dataChannel.send(message); // Send plain text message
+            } else {
+                console.warn("Data channel not ready to peer:", conn.peer); // Log if data channel isn't ready
             }
         });
 
-        append({
-            name: localStorage.getItem("username"),
-            content: message,
-            pfp: localStorage.getItem("pfpUrl") || "#f3dfbf"
-        });
+        // **Comment out `append` function call completely for now:**
+        // append({
+        //     name: localStorage.getItem("username"),
+        //     content: message,
+        //     pfp: localStorage.getItem("pfpUrl") || "#f3dfbf"
+        // });
 
         messageInput.value = "";
     }
