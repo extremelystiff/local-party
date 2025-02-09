@@ -132,16 +132,27 @@ function setupConnection(conn) {
         dataChannel.onclose = () => { console.log(`Data channel closed to ${conn.peer}`); };
         dataChannel.onerror = (error) => { console.error(`Data channel error to ${conn.peer}:`, error); };
         dataChannel.onmessage = (event) => {
-            console.log("PEER/HOST: dataChannel.onmessage handler executed! Raw data:", event.data); // Added log - VERY IMPORTANT!
+            console.log("PEER/HOST: dataChannel.onmessage handler executed! Raw data:", event.data);
         
-            // Simplified chat message handling - just log the raw message to console
-            console.log("PEER/HOST: Chat Message Received (Raw):", event.data); // Basic chat log - raw data
+            try {
+                const message = JSON.parse(event.data); // Try to parse JSON
         
-            // **Comment out video chunk handling completely for now:**
-            // const data = JSON.parse(event.data);
-            // if (data.type === 'live-video-chunk') {
-            //     handleVideoChunk({ data: data.data });
-            // }
+                if (message.type === 'chat-message') {
+                    // Handle CHAT message
+                    console.log("PEER: Chat Message Received:", message.text); // Log chat message
+                    // **Uncomment and adapt append function here to display chat in UI if needed later**
+                    // append({ name: ..., content: message.text, ... }); 
+        
+                } else if (message.type === 'live-video-chunk') {
+                    // Handle VIDEO chunk (as before)
+                    handleVideoChunk({ data: message.data }); // Pass the 'data' property to handleVideoChunk
+                } else {
+                    console.warn("PEER: Unknown message type received:", message.type); // Log unknown types
+                }
+            } catch (e) {
+                console.error("PEER: Error parsing data channel message JSON:", e);
+                console.log("PEER: Raw message data that failed parsing:", event.data); // Log raw data if parsing fails
+            }
         };
 
     conn.on('open', () => {
@@ -238,7 +249,7 @@ function captureAndStreamFrame() {
 function sendFrameChunks(frameBuffer) {
     if (!isStreaming || !isHost) return;
 
-    console.log("Sending frame chunks, buffer size:", frameBuffer.byteLength); // Added log before sending
+    console.log("Sending frame chunks, buffer size:", frameBuffer.byteLength);
 
     Object.values(connections).forEach(conn => {
         const dataChannel = conn.dataChannel;
@@ -246,15 +257,18 @@ function sendFrameChunks(frameBuffer) {
             const chunkSize = CHUNK_SIZE;
             for (let offset = 0; offset < frameBuffer.byteLength; offset += chunkSize) {
                 const chunk = frameBuffer.slice(offset, offset + chunkSize);
-                dataChannel.send(JSON.stringify({ type: 'live-video-chunk', data: chunk }));
+                const videoChunkMessage = { // Create VIDEO chunk message object
+                    type: 'live-video-chunk', // Keep type as 'live-video-chunk' for video data
+                    data: chunk // **IMPORTANT:** Send the raw chunk data directly as 'data' property
+                };
+                dataChannel.send(JSON.stringify(videoChunkMessage)); // Send VIDEO chunk as JSON
             }
-            console.log("Frame chunks sent over data channel."); // Added log after sending
+            console.log("Frame chunks sent over data channel.");
         } else {
             console.warn(`Data channel not ready for peer ${conn.peer}`);
         }
     });
 }
-
 
 const mediaQueue = {
     chunks: [],
@@ -1416,21 +1430,20 @@ form.addEventListener('submit', (e) => {
     const message = messageInput.value.trim();
 
     if (message) {
-        // Simplified chat message sending - send plain text directly
+        const chatMessage = { // Create a chat message object
+            type: 'chat-message', // Distinct type for chat
+            text: message
+        };
         Object.values(connections).forEach(conn => {
-            if (conn.dataChannel && conn.dataChannel.readyState === 'open') { // Ensure dataChannel exists and is open
-                conn.dataChannel.send(message); // Send plain text message
+            if (conn.dataChannel && conn.dataChannel.readyState === 'open') {
+                conn.dataChannel.send(JSON.stringify(chatMessage)); // Send CHAT message as JSON
             } else {
-                console.warn("Data channel not ready to peer:", conn.peer); // Log if data channel isn't ready
+                console.warn("Data channel not ready to peer:", conn.peer);
             }
         });
 
-        // **Comment out `append` function call completely for now:**
-        // append({
-        //     name: localStorage.getItem("username"),
-        //     content: message,
-        //     pfp: localStorage.getItem("pfpUrl") || "#f3dfbf"
-        // });
+        // Commented out append for now - re-enable later if needed
+        // append({ ... }); 
 
         messageInput.value = "";
     }
