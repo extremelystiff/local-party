@@ -191,10 +191,12 @@ function captureAndStreamFrame() {
     if (!isStreaming || !isHost) return;
 
     if (videoElementForCapture.videoWidth <= 0 || videoElementForCapture.videoHeight <= 0) {
-        console.warn("Video element not ready for capture yet.");
-        requestAnimationFrame(captureAndStreamFrame); // Retry in the next frame
+        console.warn("Video element not ready for capture yet. Retrying...");
+        requestAnimationFrame(captureAndStreamFrame); // Retry
         return;
     }
+
+    console.log("Capturing frame..."); // Added log: Frame capture started
 
     canvas.width = videoElementForCapture.videoWidth;
     canvas.height = videoElementForCapture.videoHeight;
@@ -203,20 +205,23 @@ function captureAndStreamFrame() {
     canvas.toBlob(blob => {
         if (!isStreaming || !isHost) return;
 
-        if (!blob) { // Check if blob is valid
+        if (!blob) {
             console.error("canvas.toBlob failed to create Blob.");
-            requestAnimationFrame(captureAndStreamFrame); // Retry in the next frame
+            requestAnimationFrame(captureAndStreamFrame);
             return;
         }
+
+        console.log("Frame converted to Blob, size:", blob.size); // Added log: Blob conversion success
 
         const reader = new FileReader();
         reader.onloadend = () => {
             const buffer = reader.result;
+            console.log("FileReader loaded ArrayBuffer, size:", buffer.byteLength); // Added log: FileReader success
             sendFrameChunks(buffer);
         };
-        reader.onerror = (error) => { // Add error handler for FileReader
+        reader.onerror = (error) => {
             console.error("FileReader error:", error);
-            requestAnimationFrame(captureAndStreamFrame); // Retry in the next frame
+            requestAnimationFrame(captureAndStreamFrame);
         };
         reader.readAsArrayBuffer(blob);
     }, 'image/jpeg', 0.7);
@@ -227,6 +232,8 @@ function captureAndStreamFrame() {
 function sendFrameChunks(frameBuffer) {
     if (!isStreaming || !isHost) return;
 
+    console.log("Sending frame chunks, buffer size:", frameBuffer.byteLength); // Added log before sending
+
     Object.values(connections).forEach(conn => {
         const dataChannel = conn.dataChannel;
         if (dataChannel && dataChannel.readyState === 'open') {
@@ -235,6 +242,7 @@ function sendFrameChunks(frameBuffer) {
                 const chunk = frameBuffer.slice(offset, offset + chunkSize);
                 dataChannel.send(JSON.stringify({ type: 'live-video-chunk', data: chunk }));
             }
+            console.log("Frame chunks sent over data channel."); // Added log after sending
         } else {
             console.warn(`Data channel not ready for peer ${conn.peer}`);
         }
