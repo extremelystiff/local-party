@@ -190,6 +190,12 @@ function stopLiveStream() {
 function captureAndStreamFrame() {
     if (!isStreaming || !isHost) return;
 
+    if (videoElementForCapture.videoWidth <= 0 || videoElementForCapture.videoHeight <= 0) {
+        console.warn("Video element not ready for capture yet.");
+        requestAnimationFrame(captureAndStreamFrame); // Retry in the next frame
+        return;
+    }
+
     canvas.width = videoElementForCapture.videoWidth;
     canvas.height = videoElementForCapture.videoHeight;
     context.drawImage(videoElementForCapture, 0, 0, canvas.width, canvas.height);
@@ -197,10 +203,20 @@ function captureAndStreamFrame() {
     canvas.toBlob(blob => {
         if (!isStreaming || !isHost) return;
 
+        if (!blob) { // Check if blob is valid
+            console.error("canvas.toBlob failed to create Blob.");
+            requestAnimationFrame(captureAndStreamFrame); // Retry in the next frame
+            return;
+        }
+
         const reader = new FileReader();
         reader.onloadend = () => {
             const buffer = reader.result;
             sendFrameChunks(buffer);
+        };
+        reader.onerror = (error) => { // Add error handler for FileReader
+            console.error("FileReader error:", error);
+            requestAnimationFrame(captureAndStreamFrame); // Retry in the next frame
         };
         reader.readAsArrayBuffer(blob);
     }, 'image/jpeg', 0.7);
