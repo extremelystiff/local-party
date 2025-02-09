@@ -1,4 +1,4 @@
-Render.js:
+
 // Initialize Notyf for notifications
 const notyf = new Notyf({ duration: 1500, position: { x: 'center', y: 'top' } });
 
