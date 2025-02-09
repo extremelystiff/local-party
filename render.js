@@ -411,9 +411,14 @@ async function processAllChunks() {
 }
 
 function handleVideoChunk(data) {
+    console.log("PEER: handleVideoChunk called, data size:", data.data.byteLength); // Added log
+
     const chunk = new Uint8Array(data.data);
     pendingChunks.push(chunk);
     receivedSize += chunk.byteLength;
+
+    const percentage = ((receivedSize / expectedSize) * 100).toFixed(1);
+    console.log(`PEER: Received chunk: ${receivedSize}/${expectedSize} bytes (${percentage}%)`);
 
     if (!sourceBuffer.updating) {
         processNextSegment();
