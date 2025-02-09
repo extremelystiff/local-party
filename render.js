@@ -68,6 +68,7 @@ const mediaQueue = {
                 if (videoType.startsWith('video/webm') && videoType.includes('av01')) {
                     mimeCodec = videoType; // Use detected AV1 MIME type
                 }
+                console.log(`Creating SourceBuffer with MIME type: ${mimeCodec}`); // Log the MIME type used
                 sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
                 sourceBuffer.mode = 'sequence';
             }
@@ -114,6 +115,7 @@ const mediaQueue = {
 
                 } catch (e) {
                     console.error('Error appending chunk:', e);
+                    console.error('DOMException Details:', e);
                     if (e.name === 'QuotaExceededError') {
                         await this.handleQuotaExceeded();
                         continue;
@@ -263,6 +265,17 @@ function setupConnection(conn) {
                     videoType = data.mimeType; // Store the mime type
                     console.log(`Expected size set to: ${expectedSize} bytes, MIME Type: ${videoType}`);
 
+                                        // **ADD THIS CHECK:**
+                    const isSupportedMP4 = MediaSource.isTypeSupported('video/mp4');
+                    const isSupportedDetailedMP4 = MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E,mp4a.40.2"');
+                    const isSupportedWebM_VP8 = MediaSource.isTypeSupported('video/webm; codecs="vp8,vorbis"');
+                    const isSupportedWebM_AV1 = MediaSource.isTypeSupported('video/webm; codecs="av01.0.01M.08"'); // Check for AV1 support
+
+                    console.log(`MIME Type Support Check:`);
+                    console.log(`  video/mp4: ${isSupportedMP4}`);
+                    console.log(`  video/mp4; codecs="avc1.42E01E,mp4a.40.2": ${isSupportedDetailedMP4}`);
+                    console.log(`  video/webm; codecs="vp8,vorbis": ${isSupportedWebM_VP8}`);
+                    console.log(`  video/webm; codecs="av01.0.01M.08": ${isSupportedWebM_AV1}`); // Log AV1 support
                     // Reset previous MediaSource
                     if (mediaSource) {
                         if (mediaSource.readyState === 'open') {
@@ -988,6 +1001,7 @@ async function startStreamingTo(conn) {
 
         // Get proper MIME type from file
         const mimeType = getVideoMimeType(videoFile);
+        console.log(`MIME Type detected and being sent: ${mimeType}`);
 
         // Send metadata with proper MIME type
         const metadata = {
