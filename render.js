@@ -137,13 +137,8 @@
                 try {
                     const message = JSON.parse(event.data); // Try to parse JSON
 
-                    if (message.type === 'chat-message') {
-                        // Handle CHAT message
-                        console.log("PEER: Chat Message Received:", message.text); // Log chat message
-                        // **Uncomment and adapt append function here to display chat in UI if needed later**
-                        // append({ name: ..., content: message.text, ... });
 
-                    } else if (message.type === 'live-video-chunk') {
+                    if (message.type === 'live-video-chunk') {
                         // Handle VIDEO chunk (as before)
                         handleVideoChunk({ data: message.data }); // Pass the 'data' property to handleVideoChunk
                     } else {
@@ -266,17 +261,11 @@
                 const chunkSize = CHUNK_SIZE;
                 for (let offset = 0; offset < frameBuffer.byteLength; offset += chunkSize) {
                     const chunk = frameBuffer.slice(offset, offset + chunkSize);
-                    if (chunk.byteLength === 0) {
-                        console.warn("Chunk byteLength is 0. Skipping this chunk!"); // Warn if chunk is empty
-                        continue; // Skip empty chunk
-                    }
-                    // Convert ArrayBuffer chunk to Base64 string
-                    const base64Chunk = btoa(String.fromCharCode(...new Uint8Array(chunk)));
                     const videoChunkMessage = {
                         type: 'live-video-chunk',
-                        data: base64Chunk // Send Base64 string as data
+                        data: chunk // <--- Send ArrayBuffer chunk DIRECTLY as 'data'
                     };
-                    dataChannel.send(JSON.stringify(videoChunkMessage));
+                    dataChannel.send(videoChunkMessage); // No JSON.stringify for data chunk itself
                 }
                 console.log("Frame chunks sent over data channel.");
             } else {
@@ -457,7 +446,7 @@
     
         // Convert Base64 string back to Uint8Array
         const binaryString = atob(data.data);
-        const chunk = new Uint8Array(binaryString.length);
+        const chunk = new Uint8Array(data); 
         for (let i = 0; i < binaryString.length; i++) {
             chunk[i] = binaryString.charCodeAt(i);
         }
