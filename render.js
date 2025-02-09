@@ -1,3 +1,4 @@
+Render.js:
 // Initialize Notyf for notifications
 const notyf = new Notyf({ duration: 1500, position: { x: 'center', y: 'top' } });
 
@@ -34,7 +35,7 @@ const mediaQueue = {
     chunks: [],
     isProcessing: false,
     mediaSourceBuffer: null,
-    
+
     async addChunk(chunk) {
         this.chunks.push(chunk);
         if (!this.isProcessing) {
@@ -44,7 +45,7 @@ const mediaQueue = {
 
     async processQueue() {
         if (this.isProcessing || this.chunks.length === 0) return;
-        
+
         this.isProcessing = true;
         console.log(`Processing queue with ${this.chunks.length} chunks`);
 
@@ -54,20 +55,26 @@ const mediaQueue = {
                 mediaSource = new MediaSource();
                 const videoElement = document.querySelector('#video-player_html5_api');
                 videoElement.src = URL.createObjectURL(mediaSource);
-                
+
                 await new Promise(resolve => {
                     mediaSource.addEventListener('sourceopen', resolve, { once: true });
                 });
             }
 
             if (!sourceBuffer) {
-                sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E,mp4a.40.2"');
+                // Default to MP4, can be adjusted based on detected codec later if needed.
+                // For AV1, we'll try to use 'video/webm; codecs=av01.0.01M.08' if detected.
+                let mimeCodec = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"'; // Default fallback
+                if (videoType.startsWith('video/webm') && videoType.includes('av01')) {
+                    mimeCodec = videoType; // Use detected AV1 MIME type
+                }
+                sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
                 sourceBuffer.mode = 'sequence';
             }
 
             while (this.chunks.length > 0) {
                 const chunk = this.chunks[0]; // Look at first chunk without removing
-                
+
                 if (sourceBuffer.updating) {
                     await new Promise(resolve => {
                         sourceBuffer.addEventListener('updateend', resolve, { once: true });
@@ -77,12 +84,12 @@ const mediaQueue = {
                 try {
                     console.log(`Appending chunk of size ${chunk.byteLength}`);
                     sourceBuffer.appendBuffer(chunk);
-                    
+
                     await new Promise((resolve, reject) => {
                         const handleUpdateEnd = () => {
                             sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
                             sourceBuffer.removeEventListener('error', handleError);
-                            
+
                             // Log buffer state
                             if (sourceBuffer.buffered.length > 0) {
                                 for (let i = 0; i < sourceBuffer.buffered.length; i++) {
@@ -128,11 +135,11 @@ const mediaQueue = {
 
     async handleQuotaExceeded() {
         if (!sourceBuffer || !sourceBuffer.buffered.length) return;
-        
+
         const currentTime = player.currentTime();
         const start = sourceBuffer.buffered.start(0);
         const removeEnd = Math.max(start, currentTime - 10);
-        
+
         await new Promise((resolve) => {
             sourceBuffer.remove(start, removeEnd);
             sourceBuffer.addEventListener('updateend', resolve, { once: true });
@@ -143,7 +150,7 @@ const mediaQueue = {
 // Initialize the application
 function initializeApp() {
     console.log('Initializing app...');
-    
+
     try {
         // Set global Video.js options first
         videojs.options.techOrder = ['html5'];
@@ -174,15 +181,15 @@ function initializeApp() {
                     nativeTextTracks: false
                 }
             });
-            
+
             console.log('Video.js initialized');
-            
+
             // Initialize player events
             initializePlayerEvents();
-            
+
             // Set up buffer monitoring
             setupBufferMonitoring();
-            
+
             // Initially disable play button until we have data
             if (player.controlBar && player.controlBar.playToggle) {
                 player.controlBar.playToggle.disable();
@@ -211,9 +218,9 @@ function initializePeer(asHost) {
     const peerId = randomString(5, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
     isHost = asHost;
     localStorage.setItem("isHost", asHost.toString());
-    
+
     peer = new Peer(peerId);
-    
+
     peer.on('open', (id) => {
         console.log('Connected to PeerJS with ID:', id);
         if (isHost) {
@@ -238,23 +245,24 @@ function setupConnection(conn) {
     connections[conn.peer] = conn;
     let metadataInitialized = false;
     let mediaSourceReady = false;
-    
+
     // Reset state variables on new connection
     pendingChunks = [];
     receivedSize = 0;
-    
+
     const videoElement = document.querySelector('#video-player_html5_api');
-    
+
     conn.on('data', async (data) => {
         console.log('Received data type:', data.type);
-        
+
         try {
             switch (data.type) {
                 case 'video-metadata':
                     console.log('Processing metadata:', data);
                     expectedSize = data.size;
-                    console.log(`Expected size set to: ${expectedSize} bytes`);
-                    
+                    videoType = data.mimeType; // Store the mime type
+                    console.log(`Expected size set to: ${expectedSize} bytes, MIME Type: ${videoType}`);
+
                     // Reset previous MediaSource
                     if (mediaSource) {
                         if (mediaSource.readyState === 'open') {
@@ -267,37 +275,42 @@ function setupConnection(conn) {
                     // Create new MediaSource
                     mediaSource = new MediaSource();
                     console.log('Created new MediaSource');
-                    
+
                     videoElement.src = URL.createObjectURL(mediaSource);
                     console.log('Set video element source');
-                    
+
                     mediaSource.addEventListener('sourceopen', () => {
                         try {
                             console.log('MediaSource opened, state:', mediaSource.readyState);
-                            
+
                             let mimeType = data.mimeType;
                             if (data.mimeType === 'video/webm') {
-                                mimeType = 'video/webm;codecs="vp8,vorbis"';
+                                // Check for AV1 codec - more robust check
+                                if (data.mimeType.includes('av01')) {
+                                    mimeType = data.mimeType; // Use the full AV1 MIME type from metadata
+                                } else {
+                                    mimeType = 'video/webm;codecs="vp8,vorbis"'; // Fallback for VP8/Vorbis
+                                }
                             }
-                            
+
                             console.log('Creating source buffer with MIME type:', mimeType);
                             sourceBuffer = mediaSource.addSourceBuffer(mimeType);
                             sourceBuffer.mode = 'sequence';
-                            sourceBuffer.timestampOffset = 0;  
+                            sourceBuffer.timestampOffset = 0;
                             console.log('Source buffer created and mode set to segments');
-                            
+
                             sourceBuffer.addEventListener('updateend', () => {
                                 if (!mediaSourceReady) {
                                     mediaSourceReady = true;
                                     console.log('MediaSource ready for chunks');
                                 }
-                                
+
                                 // Process next chunk if available
                                 if (pendingChunks.length > 0 && !sourceBuffer.updating) {
                                     const nextChunk = pendingChunks.shift();
                                     try {
                                         sourceBuffer.appendBuffer(nextChunk);
-                                        
+
                                         // Log buffer status after append
                                         if (sourceBuffer.buffered.length > 0) {
                                             const start = sourceBuffer.buffered.start(0);
@@ -323,7 +336,7 @@ function setupConnection(conn) {
                                         const buffered = sourceBuffer.buffered;
                                         const duration = buffered.end(buffered.length - 1);
                                         console.log(`Video fully processed. Duration: ${duration}s`);
-                                        
+
                                         // Wait a bit before ending the stream
                                         setTimeout(() => {
                                             if (mediaSource && mediaSource.readyState === 'open') {
@@ -341,21 +354,21 @@ function setupConnection(conn) {
                         }
                     });
                     break;
-                    
+
                 case 'video-chunk':
                     const chunk = new Uint8Array(data.data);
                     pendingChunks.push(chunk);
                     receivedSize += chunk.byteLength;
-                    
+
                     console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
                     console.log(`Pending chunks: ${pendingChunks.length}, Current chunk size: ${chunk.byteLength}`);
-                    
+
                     if (metadataInitialized && mediaSourceReady && !sourceBuffer.updating) {
                         const nextChunk = pendingChunks.shift();
                         sourceBuffer.appendBuffer(nextChunk);
                     }
                     break;
-                    
+
                 case 'video-complete':
                     console.log('Video transfer complete');
                     console.log(`Total pending chunks: ${pendingChunks.length}, Total received: ${receivedSize}/${expectedSize}`);
@@ -407,7 +420,7 @@ async function processAllChunks() {
     isProcessingChunks = true;
 
     console.log(`Starting to process ${pendingChunks.length} chunks`);
-    
+
     try {
         for (let i = 0; i < pendingChunks.length; i++) {
             if (!sourceBuffer || !mediaSource || mediaSource.readyState !== 'open') {
@@ -460,7 +473,7 @@ async function processAllChunks() {
 
         // Clear processed chunks
         pendingChunks = [];
-        
+
         // Don't end the stream immediately
         if (receivedSize >= expectedSize) {
             // Wait a bit to ensure all data is properly buffered
@@ -482,7 +495,7 @@ async function processAllChunks() {
 // Helper function to handle video chunk data
 function handleVideoChunk(data) {
     const chunk = new Uint8Array(data.data);
-    
+
     // Split large chunks into smaller segments
     if (chunk.byteLength > MAX_SEGMENT_SIZE) {
         let offset = 0;
@@ -495,7 +508,7 @@ function handleVideoChunk(data) {
     } else {
         pendingChunks.push(chunk);
     }
-    
+
     receivedSize += chunk.byteLength;
     console.log(`Segmented chunk into ${pendingChunks.length} pieces`);
 
@@ -575,7 +588,7 @@ async function processChunkBatch() {
     if (!sourceBuffer || sourceBuffer.updating) return;
 
     console.log(`Adding ${pendingChunks.length} chunks to queue...`);
-    
+
     for (const chunk of pendingChunks) {
         await mediaQueue.addChunk(chunk);
     }
@@ -627,18 +640,23 @@ function setupSourceBuffer(mimeType) {
 
     try {
         if (mimeType === 'video/webm') {
-            mimeType = 'video/webm;codecs="vp8,vorbis"';
+            // Check if it's AV1, use specific MIME type if so, otherwise default to VP8/Vorbis
+            if (mimeType.includes('av01')) {
+                mimeType = mimeType; // Keep the AV1 MIME type
+            } else {
+                mimeType = 'video/webm;codecs="vp8,vorbis"'; // Default VP8/Vorbis for generic webm
+            }
         }
-        
+
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
         // Change to 'segments' mode to handle discontinuous appends
         sourceBuffer.mode = 'sequence';
-        sourceBuffer.timestampOffset = 0;  
+        sourceBuffer.timestampOffset = 0;
         console.log('Created source buffer in segments mode');
-        
+
         // Initialize timestamp offset to 0
         sourceBuffer.timestampOffset = 0;
-        
+
         sourceBuffer.addEventListener('updateend', () => {
             if (sourceBuffer.buffered.length > 0) {
                 // Log all current ranges
@@ -657,7 +675,7 @@ function setupSourceBuffer(mimeType) {
 // Helper function to handle video complete event
 function handleVideoComplete() {
     console.log('Video transfer complete');
-    
+
     // Only end the stream if we've processed all segments and the buffer is stable
     const checkComplete = setInterval(() => {
         if (pendingChunks.length === 0 && !sourceBuffer.updating) {
@@ -673,10 +691,10 @@ function handleVideoComplete() {
 
 function removeOldBufferData(currentTime) {
     if (!sourceBuffer || !sourceBuffer.buffered.length) return;
-    
+
     const bufferedStart = sourceBuffer.buffered.start(0);
     const removeEnd = Math.max(bufferedStart, currentTime - 10);
-    
+
     if (removeEnd > bufferedStart) {
         sourceBuffer.remove(bufferedStart, removeEnd);
     }
@@ -687,25 +705,25 @@ function initializePlayerEvents() {
 
     player.on('waiting', () => {
         console.log('Video waiting for data');
-        
+
         if (sourceBuffer && sourceBuffer.buffered.length > 0) {
             const currentTime = player.currentTime();
-            
+
             console.log('Current source buffer state:', sourceBuffer.updating ? 'updating' : 'idle');
             console.log('Pending chunks:', pendingChunks.length);
-            
+
             // Log all buffer ranges
             let hasValidRange = false;
             for (let i = 0; i < sourceBuffer.buffered.length; i++) {
                 const start = sourceBuffer.buffered.start(i);
                 const end = sourceBuffer.buffered.end(i);
                 console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-                
+
                 if (currentTime >= start && currentTime <= end) {
                     hasValidRange = true;
                 }
             }
-            
+
             // If we have pending chunks, process them regardless of valid range
             if (pendingChunks.length > 0 && !sourceBuffer.updating) {
                 console.log('Processing pending chunks...');
@@ -774,11 +792,11 @@ function handleChatMessage(data) {
 function handleConnectionClose(conn) {
     console.log('Connection closed:', conn.peer);
     delete connections[conn.peer];
-    
+
     if (mediaState.mediaSourceUrl) {
         URL.revokeObjectURL(mediaState.mediaSourceUrl);
     }
-    
+
     append({
         name: 'Local Party',
         content: 'A user has disconnected.',
@@ -791,7 +809,7 @@ function handleConnectionError(conn, err) {
     console.error('Connection error:', err);
     mediaState.hasError = true;
     notyf.error("Connection error occurred");
-    
+
     // Clean up
     delete connections[conn.peer];
     if (mediaState.mediaSourceUrl) {
@@ -849,15 +867,23 @@ async function setupMediaSource(videoElement, mimeType) {
 
                 try {
                     console.log('MediaSource opened');
-                    
+
                     // Set up SourceBuffer only if it doesn't exist
                     if (!sourceBuffer) {
-                        const finalMimeType = mimeType === 'video/webm' ? 
-                            'video/webm;codecs="vp8,vorbis"' : mimeType;
+                        let finalMimeType = mimeType;
+                        if (mimeType === 'video/webm') {
+                            // Check for AV1 codec - more robust check
+                            if (mimeType.includes('av01')) {
+                                finalMimeType = mimeType; // Use the full AV1 MIME type from metadata
+                            } else {
+                                finalMimeType = 'video/webm;codecs="vp8,vorbis"'; // Fallback for VP8/Vorbis
+                            }
+                        }
+
 
                         sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
                         sourceBuffer.mode = 'sequence';
-                        sourceBuffer.timestampOffset = 0;  
+                        sourceBuffer.timestampOffset = 0;
                         console.log('SourceBuffer created');
 
                         // Add updateend listener only once
@@ -887,7 +913,7 @@ async function setupMediaSource(videoElement, mimeType) {
 
             // Add the sourceopen listener with once option
             mediaSource.addEventListener('sourceopen', handleSourceOpen, { once: true });
-            
+
             // Set video element source
             videoElement.src = mediaState.mediaSourceUrl;
 
@@ -902,7 +928,7 @@ async function setupMediaSource(videoElement, mimeType) {
 function getVideoMimeType(file) {
     // Start with the file's type
     let mimeType = file.type;
-    
+
     // If file.type is empty or generic "video", try to detect from extension
     if (!mimeType || mimeType === 'video' || mimeType === 'video/') {
         const ext = file.name.split('.').pop().toLowerCase();
@@ -911,10 +937,15 @@ function getVideoMimeType(file) {
                 mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
                 break;
             case 'webm':
-                mimeType = 'video/webm; codecs="vp8, vorbis"';
+                // More specific check for AV1 in webm (can be improved if needed)
+                if (file.type === 'video/webm' && file.name.toLowerCase().endsWith('.webm')) { // Basic check, can be refined
+                    mimeType = 'video/webm; codecs="av01.0.01M.08"'; // Assuming Main Profile Level 3.0, adjust if needed
+                } else {
+                    mimeType = 'video/webm; codecs="vp8, vorbis"';
+                }
                 break;
-             case 'webmvp9':
-               mimeType = 'video/webm; codecs="vp9, opus"';
+            case 'webmvp9':
+                mimeType = 'video/webm; codecs="vp9, opus"';
                 break;
             case 'ogg':
                 mimeType = 'video/ogg; codecs="theora, vorbis"';
@@ -931,12 +962,16 @@ function getVideoMimeType(file) {
             case '3gp':
                 mimeType = 'video/3gpp';
                 break;
+            case 'av1': // Added explicit av1 extension handling (if files might have this extension)
+            case 'avif': // Or avif container
+                mimeType = 'video/webm; codecs="av01.0.01M.08"'; // Assuming webm container for av1, adjust if using MP4 frag etc.
+                break;
             default:
                 // Default to MP4 if we can't detect
                 mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
         }
     }
-    
+
     console.log('Detected MIME type:', mimeType, 'for file:', file.name);
     return mimeType;
 }
@@ -962,7 +997,7 @@ async function startStreamingTo(conn) {
             mimeType: mimeType,
             lastModified: videoFile.lastModified
         };
-        
+
         console.log('Sending metadata:', metadata);
         conn.send(metadata);
 
@@ -974,18 +1009,18 @@ async function startStreamingTo(conn) {
         while (offset < videoFile.size) {
             const chunk = videoFile.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
-            
+
             conn.send({
                 type: 'video-chunk',
                 data: buffer,
                 offset: offset,
                 total: videoFile.size
             });
-            
+
             offset += buffer.byteLength;
             await new Promise(resolve => setTimeout(resolve, 50));
         }
-        
+
         conn.send({ type: 'video-complete' });
         notyf.success("Video sent to peer");
     } catch (err) {
@@ -999,11 +1034,11 @@ async function startStreamingTo(conn) {
 function handleVideoMetadata(data) {
     console.log('Processing metadata:', data);
     expectedSize = data.size;
-    
+
     // Reset state
     pendingChunks = [];
     receivedSize = 0;
-    
+
     try {
         // Clean up existing MediaSource
         if (mediaSource) {
@@ -1092,14 +1127,21 @@ async function initializeMediaSource(videoElement, mimeType) {
             const sourceOpenHandler = () => {
                 try {
                     console.log('MediaSource opened');
-                    
+
                     // Set up source buffer
-                    const finalMimeType = mimeType === 'video/webm' ? 
-                        'video/webm;codecs="vp8,vorbis"' : mimeType;
-                    
+                    let finalMimeType = mimeType;
+                    if (mimeType === 'video/webm') {
+                        // Check for AV1 codec - more robust check
+                        if (mimeType.includes('av01')) {
+                            finalMimeType = mimeType; // Use the full AV1 MIME type from metadata
+                        } else {
+                            finalMimeType = 'video/webm;codecs="vp8,vorbis"'; // Fallback for VP8/Vorbis
+                        }
+                    }
+
                     sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
                     sourceBuffer.mode = 'sequence';
-                    sourceBuffer.timestampOffset = 0;  
+                    sourceBuffer.timestampOffset = 0;
                     console.log('SourceBuffer created successfully');
 
                     // Set up source buffer event listeners
@@ -1143,18 +1185,18 @@ async function initializeMediaSource(videoElement, mimeType) {
 
 async function retryInitialization(videoElement, mimeType, maxRetries = 3) {
     let attempts = 0;
-    
+
     while (attempts < maxRetries) {
         try {
             console.log(`Attempt ${attempts + 1} of ${maxRetries} to initialize media source`);
-            
+
             // Reset state
             mediaState.isReady = false;
             mediaState.hasError = false;
             mediaState.isInitializing = false;
             pendingChunks = [];
             receivedSize = 0;
-            
+
             const success = await initializeMediaSource(videoElement, mimeType);
             if (success) {
                 console.log('Media source initialization succeeded');
@@ -1166,7 +1208,7 @@ async function retryInitialization(videoElement, mimeType, maxRetries = 3) {
         }
         attempts++;
     }
-    
+
     console.error('All initialization attempts failed');
     return false;
 }
@@ -1222,9 +1264,9 @@ function appendBufferAsync(chunk) {
 // Helper function to check if stream is complete
 function isStreamComplete() {
     return (
-        receivedSize >= expectedSize && 
-        pendingChunks.length === 0 && 
-        sourceBuffer && 
+        receivedSize >= expectedSize &&
+        pendingChunks.length === 0 &&
+        sourceBuffer &&
         !sourceBuffer.updating
     );
 }
@@ -1244,39 +1286,39 @@ function setupBufferMonitoring() {
             if (sourceBuffer.buffered.length > 0) {
                 const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
                 const bufferAhead = bufferedEnd - currentTime;
-                
+
                 console.log(`Buffer status: ${bufferAhead.toFixed(2)}s ahead, ` +
-                          `${pendingChunks.length} chunks remaining, ` +
-                          `${receivedSize}/${expectedSize} bytes received`);
+                    `${pendingChunks.length} chunks remaining, ` +
+                    `${receivedSize}/${expectedSize} bytes received`);
             }
         }
     }, 500);
-    
+
     // Handle waiting events more aggressively
-player.on('waiting', () => {
-    console.log('Video waiting for data');
-    
-    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-        const currentTime = player.currentTime();
-        
-        // Log all buffer ranges
-        let hasValidRange = false;
-        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-            const start = sourceBuffer.buffered.start(i);
-            const end = sourceBuffer.buffered.end(i);
-            console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-            
-            if (currentTime >= start && currentTime <= end) {
-                hasValidRange = true;
+    player.on('waiting', () => {
+        console.log('Video waiting for data');
+
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
+
+            // Log all buffer ranges
+            let hasValidRange = false;
+            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                const start = sourceBuffer.buffered.start(i);
+                const end = sourceBuffer.buffered.end(i);
+                console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+
+                if (currentTime >= start && currentTime <= end) {
+                    hasValidRange = true;
+                }
+            }
+
+            if (!hasValidRange && pendingChunks.length > 0) {
+                console.log('Current time outside buffered ranges, processing more chunks');
+                processNextChunk();
             }
         }
-        
-        if (!hasValidRange && pendingChunks.length > 0) {
-            console.log('Current time outside buffered ranges, processing more chunks');
-            processNextChunk();
-        }
-    }
-});
+    });
 
     // Cleanup on player dispose
     player.on('dispose', () => {
@@ -1321,19 +1363,19 @@ function handleVideoChunk(data) {
 
 function initializePlayerControls() {
     if (!player) return;
-    
+
     // Initially disable play button until we have enough data
     player.controlBar.playToggle.disable();
-    
+
     player.on('canplay', () => {
         console.log('Video can play');
         player.controlBar.playToggle.enable();
     });
-    
+
     player.on('playing', () => {
         console.log('Video started playing');
     });
-    
+
     player.on('error', (e) => {
         console.error('Player error:', e);
     });
@@ -1341,9 +1383,9 @@ function initializePlayerControls() {
 // Handle video controls
 function handleVideoControl(data) {
     if (!allowEmit || !player) return;
-    
+
     allowEmit = false;  // Prevent echo
-    
+
     try {
         // Always sync time first
         if (Math.abs(player.currentTime() - data.time) > 0.5) {
@@ -1374,7 +1416,7 @@ function handleVideoControl(data) {
     } catch (e) {
         console.error('Error handling video control:', e);
     }
-    
+
     // Re-enable control emission after a delay
     setTimeout(() => { allowEmit = true; }, 500);
 }
@@ -1393,11 +1435,11 @@ function time(state, username, context) {
     let hours = Math.floor(context / 3600);
     let minutes = Math.floor((context % 3600) / 60);
     let seconds = Math.floor(context % 60);
-    
+
     hours = hours < 10 ? "0" + hours : hours;
     minutes = minutes < 10 ? "0" + minutes : minutes;
     seconds = seconds < 10 ? "0" + seconds : seconds;
-    
+
     let contentString = `${username} ${state} the video at ${minutes}:${seconds}`;
     if (hours !== "00") {
         contentString = `${username} ${state} the video at ${hours}:${minutes}:${seconds}`;
@@ -1445,10 +1487,10 @@ function appendData(roomName, roomCode) {
 function onChangeFile() {
     const fileInput = document.getElementById("file-id");
     if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
-    
+
     videoFile = fileInput.files[0];
     const url = URL.createObjectURL(videoFile);
-    
+
     player.src({
         src: url,
         type: videoFile.type
@@ -1458,27 +1500,27 @@ function onChangeFile() {
 // Video controls handler
 function videoControlsHandler(e) {
     if (!allowEmit || !player || !mediaState.isReady) return;
-    
+
     allowEmit = false;  // Prevent control echo
-    
+
     try {
         const currentTime = player.currentTime();
         console.log(`Sending ${e.type} command at time ${currentTime}`);
-        
+
         const controlData = {
             type: 'control',
             action: e.type,
             time: currentTime,
             username: localStorage.getItem("username")
         };
-        
+
         // Send to all connected peers
         Object.values(connections).forEach(conn => {
             if (conn.open) {
                 conn.send(controlData);
             }
         });
-        
+
         // Log local action
         const content = time(e.type === 'play' ? "played" : "paused", "You", currentTime);
         append({
@@ -1489,7 +1531,7 @@ function videoControlsHandler(e) {
     } catch (e) {
         console.error('Error in video controls handler:', e);
     }
-    
+
     // Re-enable control emission after a delay
     setTimeout(() => { allowEmit = true; }, 500);
 }
@@ -1497,15 +1539,15 @@ function videoControlsHandler(e) {
 // Additional video player event listeners
 function initializeVideoPlayerEvents() {
     if (!player) return;
-    
+
     // Handle seeking events
     player.on('seeking', () => {
         if (!allowEmit) return;
-        
+
         allowEmit = false;
         const currentTime = player.currentTime();
         removeOldBufferData(currentTime);
-        
+
         Object.values(connections).forEach(conn => {
             if (conn.open) {
                 conn.send({
@@ -1516,36 +1558,36 @@ function initializeVideoPlayerEvents() {
                 });
             }
         });
-        
+
         setTimeout(() => { allowEmit = true; }, 500);
     });
-    
+
     // Handle buffering events
-player.on('waiting', () => {
-    console.log('Video waiting for data');
-    
-    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-        const currentTime = player.currentTime();
-        
-        // Log all buffer ranges
-        let hasValidRange = false;
-        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-            const start = sourceBuffer.buffered.start(i);
-            const end = sourceBuffer.buffered.end(i);
-            console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-            
-            if (currentTime >= start && currentTime <= end) {
-                hasValidRange = true;
+    player.on('waiting', () => {
+        console.log('Video waiting for data');
+
+        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+            const currentTime = player.currentTime();
+
+            // Log all buffer ranges
+            let hasValidRange = false;
+            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+                const start = sourceBuffer.buffered.start(i);
+                const end = sourceBuffer.buffered.end(i);
+                console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
+
+                if (currentTime >= start && currentTime <= end) {
+                    hasValidRange = true;
+                }
+            }
+
+            if (!hasValidRange && pendingChunks.length > 0) {
+                console.log('Current time outside buffered ranges, processing more chunks');
+                processNextChunk();
             }
         }
-        
-        if (!hasValidRange && pendingChunks.length > 0) {
-            console.log('Current time outside buffered ranges, processing more chunks');
-            processNextChunk();
-        }
-    }
-});
-    
+    });
+
     // Handle playback errors
     player.on('error', (error) => {
         console.error('Video playback error:', error);
@@ -1556,34 +1598,34 @@ player.on('waiting', () => {
 }
 
 // Set up event listeners
-document.addEventListener("click", function(e) {
+document.addEventListener("click", function (e) {
     switch (e.target.id) {
         case "createRoomButton":
             landingPage.style.display = "none";
             createPage.style.display = "block";
             break;
-            
+
         case "roomCreateButton":
             handleRoomCreate();
             break;
-            
+
         case "joinRoomButton":
             landingPage.style.display = "none";
             joinPage.style.display = "block";
             const fileInput = document.getElementById("file-id");
             if (fileInput) fileInput.style.display = "none";
             break;
-            
+
         case "roomJoinButton":
             handleRoomJoin();
             break;
-            
+
         case "roomLeaveButton":
             Object.values(connections).forEach(conn => conn.close());
             peer.destroy();
             location.reload();
             break;
-            
+
         case "backButton":
             joinPage.style.display = "none";
             createPage.style.display = "none";
@@ -1596,33 +1638,33 @@ document.addEventListener("click", function(e) {
 function handleRoomCreate() {
     const roomName = document.getElementById("roomname").value;
     const username = document.getElementById("create-username").value;
-    
+
     if (!roomName || !username) {
         document.getElementById("createRoomText").innerHTML = "Please fill in all fields";
         return;
     }
-    
+
     const fileInput = document.getElementById("file-id");
     if (!fileInput || !fileInput.files || !fileInput.files[0]) {
         document.getElementById("createRoomText").innerHTML = "Please select a video file";
         return;
     }
-    
+
     if (!videoFile) {
         videoFile = fileInput.files[0];
     }
-    
+
     localStorage.setItem("username", username);
     localStorage.setItem("roomName", roomName);
-    
+
     initializePeer(true);
-    
+
     document.getElementById("roomNameText").innerHTML = roomName;
     document.getElementById("createRoomText").innerHTML = "";
     createPage.style.display = "none";
     document.title = `Local Party | ${roomName}`;
     roomPage.style.display = "block";
-    
+
     appendData(roomName, peer.id);
 }
 
@@ -1630,41 +1672,41 @@ function handleRoomCreate() {
 function handleRoomJoin() {
     const hostPeerId = document.getElementById("roomCode").value;
     const username = document.getElementById("join-username").value;
-    
+
     if (!hostPeerId || !username) {
         document.getElementById("joinRoomText").innerHTML = "Please fill in all fields";
         return;
     }
-    
+
     localStorage.setItem("username", username);
-    
+
     initializePeer(false);
-    
+
     // Clear any existing video
     if (player) {
         player.reset();
     }
     videoFile = null;
-    
+
     peer.on('open', () => {
         console.log('Connecting to host:', hostPeerId);
         const conn = peer.connect(hostPeerId);
-        
+
         conn.on('open', () => {
             console.log('Connected to host successfully');
             setupConnection(conn);
-            
+
             conn.send({
                 type: 'video-request'
             });
-            
+
             document.getElementById("roomCodeText").innerHTML = hostPeerId;
             joinPage.style.display = "none";
             document.title = "Local Party | Room";
             roomPage.style.display = "block";
             appendData("Room", hostPeerId);
         });
-        
+
         conn.on('error', (err) => {
             console.error('Connection error:', err);
             document.getElementById("joinRoomText").innerHTML = "Failed to connect to room";
@@ -1679,7 +1721,7 @@ form.addEventListener('submit', (e) => {
     e.preventDefault();
     const messageInput = document.getElementById("messageInp");
     const message = messageInput.value.trim();
-    
+
     if (message) {
         const chatData = {
             type: 'chat',
@@ -1687,19 +1729,19 @@ form.addEventListener('submit', (e) => {
             message: message,
             pfp: localStorage.getItem("pfpUrl") || "#f3dfbf"
         };
-        
+
         Object.values(connections).forEach(conn => {
             if (conn.open) {
                 conn.send(chatData);
             }
         });
-        
+
         append({
             name: localStorage.getItem("username"),
             content: message,
             pfp: localStorage.getItem("pfpUrl") || "#f3dfbf"
         });
-        
+
         messageInput.value = "";
     }
 });
@@ -1712,11 +1754,11 @@ function setupBufferMonitoring() {
             const currentTime = player.currentTime();
             const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
             const bufferAhead = bufferedEnd - currentTime;
-            
+
             console.log(`Buffer status: ${bufferAhead.toFixed(2)}s ahead, ` +
-                      `${pendingChunks.length} chunks remaining, ` +
-                      `${receivedSize}/${expectedSize} bytes received`);
-            
+                `${pendingChunks.length} chunks remaining, ` +
+                `${receivedSize}/${expectedSize} bytes received`);
+
             // More aggressive chunk processing
             if (pendingChunks.length > 0 && !sourceBuffer.updating) {
                 processNextChunk();
@@ -1727,10 +1769,10 @@ function setupBufferMonitoring() {
 
 function logBufferStatus() {
     if (!sourceBuffer || !player) return;
-    
+
     const videoElement = player.tech().el();
     console.log("--- Buffer Status Check ---");
-    
+
     // Log SourceBuffer ranges
     if (sourceBuffer.buffered.length > 0) {
         console.log("SourceBuffer ranges:");
@@ -1740,7 +1782,7 @@ function logBufferStatus() {
             console.log(`Range ${i}: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
         }
     }
-    
+
     // Log Video Element ranges
     if (videoElement.buffered.length > 0) {
         console.log("Video Element ranges:");
