@@ -218,22 +218,27 @@
         canvas.width = videoElementForCapture.videoWidth;
         canvas.height = videoElementForCapture.videoHeight;
         context.drawImage(videoElementForCapture, 0, 0, canvas.width, canvas.height);
-
         canvas.toBlob(blob => {
             if (!isStreaming || !isHost) return;
-
+        
             if (!blob) {
                 console.error("canvas.toBlob failed to create Blob.");
                 requestAnimationFrame(captureAndStreamFrame);
                 return;
             }
-
-            console.log("Frame converted to Blob, size:", blob.size); // Added log: Blob conversion success
-
+        
+            console.log("Frame converted to Blob, size:", blob.size); // Log blob size
+            if (blob.size === 0) {
+                console.warn("Blob size is 0. Investigate canvas.toBlob!"); // Warn if blob is empty
+            }
+        
             const reader = new FileReader();
             reader.onloadend = () => {
                 const buffer = reader.result;
-                console.log("FileReader loaded ArrayBuffer, size:", buffer.byteLength); // Added log: FileReader success
+                console.log("FileReader loaded ArrayBuffer, size:", buffer.byteLength);
+                if (buffer.byteLength === 0) {
+                    console.warn("ArrayBuffer byteLength is 0. Investigate FileReader or Blob!"); // Warn if buffer is empty
+                }
                 sendFrameChunks(buffer);
             };
             reader.onerror = (error) => {
@@ -250,6 +255,10 @@
         if (!isStreaming || !isHost) return;
 
         console.log("Sending frame chunks, buffer size:", frameBuffer.byteLength);
+        if (frameBuffer.byteLength === 0) {
+            console.warn("frameBuffer byteLength is 0. No chunks to send!"); // Warn if buffer is empty
+            return; // Don't send if buffer is empty
+        }
 
         Object.values(connections).forEach(conn => {
             const dataChannel = conn.dataChannel;
@@ -257,6 +266,10 @@
                 const chunkSize = CHUNK_SIZE;
                 for (let offset = 0; offset < frameBuffer.byteLength; offset += chunkSize) {
                     const chunk = frameBuffer.slice(offset, offset + chunkSize);
+                    if (chunk.byteLength === 0) {
+                        console.warn("Chunk byteLength is 0. Skipping this chunk!"); // Warn if chunk is empty
+                        continue; // Skip empty chunk
+                    }
                     // Convert ArrayBuffer chunk to Base64 string
                     const base64Chunk = btoa(String.fromCharCode(...new Uint8Array(chunk)));
                     const videoChunkMessage = {
@@ -433,21 +446,28 @@
     }
 
     function handleVideoChunk(data) {
-        console.log("PEER: handleVideoChunk called, data size (base64 string length):", data.data.length); // Log string length
-
+        console.log("PEER: handleVideoChunk called, data:", data); // Log the whole data object for debugging
+    
+        if (!data || !data.data || typeof data.data !== 'string') {
+            console.warn("PEER: Received video chunk message with missing or invalid data. Skipping.");
+            return; // Exit the function early
+        }
+    
+        console.log("PEER: handleVideoChunk called, data size (base64 string length):", data.data.length);
+    
         // Convert Base64 string back to Uint8Array
         const binaryString = atob(data.data);
         const chunk = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
             chunk[i] = binaryString.charCodeAt(i);
         }
-
+    
         pendingChunks.push(chunk);
         receivedSize += chunk.byteLength;
-
+    
         const percentage = ((receivedSize / expectedSize) * 100).toFixed(1);
         console.log(`PEER: Received chunk: ${receivedSize}/${expectedSize} bytes (${percentage}%)`);
-
+    
         if (!sourceBuffer.updating) {
             processNextSegment();
         }
