@@ -108,7 +108,7 @@ function initializePeer(asHost) {
         console.log('Connected to PeerJS with ID:', id);
         if (isHost) {
             document.getElementById("roomCodeText").innerHTML = id;
-            startWebcamStream(); // Start webcam stream for host
+            setTimeout(startWebcamStream, 1000); // Delay start by 1 second
         }
     });
 
