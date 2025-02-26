@@ -1,1765 +1,1710 @@
-// Initialize Notyf for notifications
-const notyf = new Notyf({ duration: 1500, position: { x: 'center', y: 'top' } });
+/**
+ * Enhanced Local Party - P2P Video Sharing Application
+ * A web app for sharing and synchronized video playback with friends using WebRTC/PeerJS
+ */
 
-// PeerJS variables
-let peer = null;
-let connections = {};
-let videoFile = null;
-const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
-
-// UI elements
-const landingPage = document.getElementById("landing");
-const createPage = document.getElementById("create");
-const joinPage = document.getElementById("join");
-const roomPage = document.getElementById("room");
-const videoPlayer = document.getElementById("video-player");
-
-// Global status variables
-let isHost = false;
-let player = null;
-let allowEmit = true;
-let mediaSource = null;
-let sourceBuffer = null;
-let pendingChunks = [];
-let receivedChunks = [];
-let isFirstChunk = true;
-let isBuffering = false;
-let receivedSize = 0;
-let expectedSize = 0;
-let videoType = '';
-let currentTimestamp = 0;
-let lastAppendedEnd = 0;
-
-const mediaQueue = {
-    chunks: [],
-    isProcessing: false,
-    mediaSourceBuffer: null,
+// Configuration constants
+const CONFIG = {
+  CHUNK_SIZE: 1024 * 1024, // Default chunk size (1MB)
+  MIN_CHUNK_SIZE: 256 * 1024, // Minimum chunk size for slow connections (256KB)
+  MAX_CHUNK_SIZE: 2 * 1024 * 1024, // Maximum chunk size for fast connections (2MB)
+  BUFFER_GOAL: 15, // Target seconds of video to buffer ahead
+  MAX_RECONNECT_ATTEMPTS: 5, // Maximum reconnection attempts
+  SYNC_THRESHOLD: 0.5, // Time difference threshold for video synchronization (seconds)
+  PEER_CONFIG: { // ICE servers for better NAT traversal
+    debug: 1,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' /**
+ * Video Compatibility Helper
+ * Detects browser support for various video formats
+ */
+class VideoCompatibilityHelper {
+  constructor() {
+    this.testVideoElement = document.createElement('video');
+    this.supportedFormats = this.detectSupportedFormats();
+  }
+  
+  /**
+   * Detect supported video formats in the current browser
+   */
+  detectSupportedFormats() {
+    const formats = {
+      mp4: {
+        supported: this.testVideoElement.canPlayType('video/mp4') !== '',
+        mimeType: 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"'
+      },
+      webm: {
+        supported: this.testVideoElement.canPlayType('video/webm') !== '',
+        mimeType: 'video/webm; codecs="vp8,vorbis"'
+      },
+      webmVP9: {
+        supported: this.testVideoElement.canPlayType('video/webm; codecs="vp9"') !== '',
+        mimeType: 'video/webm; codecs="vp9,opus"'
+      },
+      ogg: {
+        supported: this.testVideoElement.canPlayType('video/ogg') !== '',
+        mimeType: 'video/ogg; codecs="theora,vorbis"'
+      },
+      mov: {
+        supported: this.testVideoElement.canPlayType('video/quicktime') !== '',
+        mimeType: 'video/quicktime'
+      },
+      mkv: {
+        supported: false, // Not natively supported in browsers
+        mimeType: 'video/x-matroska'
+      },
+      avi: {
+        supported: false, // Not natively supported in browsers
+        mimeType: 'video/x-msvideo'
+      }
+    };
     
-    async addChunk(chunk) {
-        this.chunks.push(chunk);
-        if (!this.isProcessing) {
-            await this.processQueue();
-        }
-    },
-
-    async processQueue() {
-        if (this.isProcessing || this.chunks.length === 0) return;
-        
-        this.isProcessing = true;
-        console.log(`Processing queue with ${this.chunks.length} chunks`);
-
-        try {
-            if (!mediaSource || mediaSource.readyState !== 'open') {
-                console.log('Creating new MediaSource');
-                mediaSource = new MediaSource();
-                const videoElement = document.querySelector('#video-player_html5_api');
-                videoElement.src = URL.createObjectURL(mediaSource);
-                
-                await new Promise(resolve => {
-                    mediaSource.addEventListener('sourceopen', resolve, { once: true });
-                });
-            }
-
-            if (!sourceBuffer) {
-                sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E,mp4a.40.2"');
-                sourceBuffer.mode = 'sequence';
-            }
-
-            while (this.chunks.length > 0) {
-                const chunk = this.chunks[0]; // Look at first chunk without removing
-                
-                if (sourceBuffer.updating) {
-                    await new Promise(resolve => {
-                        sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                    });
-                }
-
-                try {
-                    console.log(`Appending chunk of size ${chunk.byteLength}`);
-                    sourceBuffer.appendBuffer(chunk);
-                    
-                    await new Promise((resolve, reject) => {
-                        const handleUpdateEnd = () => {
-                            sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                            sourceBuffer.removeEventListener('error', handleError);
-                            
-                            // Log buffer state
-                            if (sourceBuffer.buffered.length > 0) {
-                                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                                    console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
-                                }
-                            }
-                            resolve();
-                        };
-
-                        const handleError = (err) => {
-                            sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                            sourceBuffer.removeEventListener('error', handleError);
-                            reject(err);
-                        };
-
-                        sourceBuffer.addEventListener('updateend', handleUpdateEnd);
-                        sourceBuffer.addEventListener('error', handleError);
-                    });
-
-                    // Only remove chunk from queue after successful append
-                    this.chunks.shift();
-
-                } catch (e) {
-                    console.error('Error appending chunk:', e);
-                    if (e.name === 'QuotaExceededError') {
-                        await this.handleQuotaExceeded();
-                        continue;
-                    }
-                    break;
-                }
-            }
-
-        } catch (e) {
-            console.error('Error in queue processing:', e);
-        } finally {
-            this.isProcessing = false;
-            if (this.chunks.length > 0) {
-                // Still have chunks to process
-                setTimeout(() => this.processQueue(), 100);
-            }
-        }
-    },
-
-    async handleQuotaExceeded() {
-        if (!sourceBuffer || !sourceBuffer.buffered.length) return;
-        
-        const currentTime = player.currentTime();
-        const start = sourceBuffer.buffered.start(0);
-        const removeEnd = Math.max(start, currentTime - 10);
-        
-        await new Promise((resolve) => {
-            sourceBuffer.remove(start, removeEnd);
-            sourceBuffer.addEventListener('updateend', resolve, { once: true });
-        });
+    console.log('Browser video format support:', formats);
+    return formats;
+  }
+  
+  /**
+   * Check if a file format is compatible
+   */
+  checkFileCompatibility(file) {
+    // Get file extension
+    const extension = file.name.split('.').pop().toLowerCase();
+    
+    // Check if this format is supported
+    if (this.supportedFormats[extension] && this.supportedFormats[extension].supported) {
+      return {
+        compatible: true,
+        mimeType: this.supportedFormats[extension].mimeType
+      };
     }
-};
-
-// Initialize the application
-function initializeApp() {
-    console.log('Initializing app...');
     
-    try {
-        // Set global Video.js options first
-        videojs.options.techOrder = ['html5'];
-        videojs.options.html5 = {
-            nativeVideoTracks: false,
-            nativeAudioTracks: false,
-            nativeTextTracks: false,
-            hls: {
-                overrideNative: true
-            }
-        };
-
-        // Only initialize if player doesn't exist
-        if (!player) {
-            player = videojs('video-player', {
-                controls: true,
-                preload: 'auto',
-                fluid: true,
-                playsinline: true,
-                autoplay: false,
-                html5: {
-                    vhs: {
-                        overrideNative: true,
-                        enableLowInitialPlaylist: true,
-                    },
-                    nativeVideoTracks: false,
-                    nativeAudioTracks: false,
-                    nativeTextTracks: false
-                }
-            });
-            
-            console.log('Video.js initialized');
-            
-            // Initialize player events
-            initializePlayerEvents();
-            
-            // Set up buffer monitoring
-            setupBufferMonitoring();
-            
-            // Initially disable play button until we have data
-            if (player.controlBar && player.controlBar.playToggle) {
-                player.controlBar.playToggle.disable();
-            }
-        }
-
-        // Show landing page
-        if (landingPage) {
-            landingPage.style.display = "block";
-            console.log('Landing page displayed');
-        }
-    } catch (e) {
-        console.error('Initialization error:', e);
+    // If extension not found in our list, try with the file's type
+    const fileType = file.type.split('/')[1];
+    if (this.supportedFormats[fileType] && this.supportedFormats[fileType].supported) {
+      return {
+        compatible: true,
+        mimeType: this.supportedFormats[fileType].mimeType
+      };
     }
-}
-
-// Initialize on DOM load
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initializeApp);
-} else {
-    initializeApp();
-}
-
-// Initialize PeerJS connection
-function initializePeer(asHost) {
-    const peerId = randomString(5, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
-    isHost = asHost;
-    localStorage.setItem("isHost", asHost.toString());
     
-    peer = new Peer(peerId);
-    
-    peer.on('open', (id) => {
-        console.log('Connected to PeerJS with ID:', id);
-        if (isHost) {
-            document.getElementById("roomCodeText").innerHTML = id;
-        }
-    });
-
-    peer.on('connection', (conn) => {
-        console.log('Incoming connection from:', conn.peer);
-        setupConnection(conn);
-    });
-
-    peer.on('error', (err) => {
-        console.error('PeerJS error:', err);
-        notyf.error("Connection error occurred");
-    });
-}
-
-// Set up peer connection
-// Setup peer connection with improved error handling and state management
-function setupConnection(conn) {
-    connections[conn.peer] = conn;
-    let metadataInitialized = false;
-    let mediaSourceReady = false;
-    
-    // Reset state variables on new connection
-    pendingChunks = [];
-    receivedSize = 0;
-    
-    const videoElement = document.querySelector('#video-player_html5_api');
-    
-    conn.on('data', async (data) => {
-        console.log('Received data type:', data.type);
-        
-        try {
-            switch (data.type) {
-                case 'video-metadata':
-                    console.log('Processing metadata:', data);
-                    expectedSize = data.size;
-                    console.log(`Expected size set to: ${expectedSize} bytes`);
-                    
-                    // Reset previous MediaSource
-                    if (mediaSource) {
-                        if (mediaSource.readyState === 'open') {
-                            mediaSource.endOfStream();
-                        }
-                        mediaSource = null;
-                        sourceBuffer = null;
-                    }
-
-                    // Create new MediaSource
-                    mediaSource = new MediaSource();
-                    console.log('Created new MediaSource');
-                    
-                    videoElement.src = URL.createObjectURL(mediaSource);
-                    console.log('Set video element source');
-                    
-                    mediaSource.addEventListener('sourceopen', () => {
-                        try {
-                            console.log('MediaSource opened, state:', mediaSource.readyState);
-                            
-                            let mimeType = data.mimeType;
-                            if (data.mimeType === 'video/webm') {
-                                mimeType = 'video/webm;codecs="vp8,vorbis"';
-                            }
-                            
-                            console.log('Creating source buffer with MIME type:', mimeType);
-                            sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                            sourceBuffer.mode = 'sequence';
-                            sourceBuffer.timestampOffset = 0;  
-                            console.log('Source buffer created and mode set to segments');
-                            
-                            sourceBuffer.addEventListener('updateend', () => {
-                                if (!mediaSourceReady) {
-                                    mediaSourceReady = true;
-                                    console.log('MediaSource ready for chunks');
-                                }
-                                
-                                // Process next chunk if available
-                                if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                                    const nextChunk = pendingChunks.shift();
-                                    try {
-                                        sourceBuffer.appendBuffer(nextChunk);
-                                        
-                                        // Log buffer status after append
-                                        if (sourceBuffer.buffered.length > 0) {
-                                            const start = sourceBuffer.buffered.start(0);
-                                            const end = sourceBuffer.buffered.end(0);
-                                            console.log(`Buffer status: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
-                                        }
-                                    } catch (e) {
-                                        console.error('Error appending buffer:', e);
-                                        if (e.name === 'QuotaExceededError') {
-                                            // Handle quota exceeded
-                                            if (sourceBuffer.buffered.length > 0) {
-                                                const start = sourceBuffer.buffered.start(0);
-                                                const currentTime = player.currentTime();
-                                                // Remove buffer from start up to 10 seconds before current time
-                                                sourceBuffer.remove(start, Math.max(start, currentTime - 10));
-                                                pendingChunks.unshift(nextChunk); // Put chunk back
-                                            }
-                                        }
-                                    }
-                                } else if (receivedSize >= expectedSize && pendingChunks.length === 0) {
-                                    // Only end stream when we've processed all chunks
-                                    if (sourceBuffer.buffered.length > 0) {
-                                        const buffered = sourceBuffer.buffered;
-                                        const duration = buffered.end(buffered.length - 1);
-                                        console.log(`Video fully processed. Duration: ${duration}s`);
-                                        
-                                        // Wait a bit before ending the stream
-                                        setTimeout(() => {
-                                            if (mediaSource && mediaSource.readyState === 'open') {
-                                                mediaSource.endOfStream();
-                                            }
-                                        }, 1000);
-                                    }
-                                }
-                            });
-
-                            metadataInitialized = true;
-                            console.log('Metadata initialized, ready for chunks');
-                        } catch (e) {
-                            console.error('Error in sourceopen:', e);
-                        }
-                    });
-                    break;
-                    
-                case 'video-chunk':
-                    const chunk = new Uint8Array(data.data);
-                    pendingChunks.push(chunk);
-                    receivedSize += chunk.byteLength;
-                    
-                    console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${((receivedSize/expectedSize)*100).toFixed(1)}%)`);
-                    console.log(`Pending chunks: ${pendingChunks.length}, Current chunk size: ${chunk.byteLength}`);
-                    
-                    if (metadataInitialized && mediaSourceReady && !sourceBuffer.updating) {
-                        const nextChunk = pendingChunks.shift();
-                        sourceBuffer.appendBuffer(nextChunk);
-                    }
-                    break;
-                    
-                case 'video-complete':
-                    console.log('Video transfer complete');
-                    console.log(`Total pending chunks: ${pendingChunks.length}, Total received: ${receivedSize}/${expectedSize}`);
-                    break;
-
-                case 'video-request':
-                    if (isHost && videoFile) {
-                        console.log('Starting video stream');
-                        await startStreamingTo(conn);
-                    }
-                    break;
-
-                case 'chat':
-                    handleChatMessage(data);
-                    break;
-
-                case 'control':
-                    if (mediaState.isReady && player) {
-                        handleVideoControl(data);
-                    }
-                    break;
-            }
-        } catch (error) {
-            console.error('Error processing data:', error);
-            mediaState.hasError = true;
-            notyf.error("Error processing video data");
-        }
-    });
-
-    conn.on('open', () => {
-        console.log('Connection opened to peer:', conn.peer);
-        if (!isHost) {
-            conn.send({ type: 'video-request' });
-        }
-    });
-
-    conn.on('close', () => {
-        handleConnectionClose(conn);
-    });
-
-    conn.on('error', (err) => {
-        handleConnectionError(conn, err);
-    });
-}
-
-let isProcessingChunks = false;
-async function processAllChunks() {
-    if (isProcessingChunks) return;
-    isProcessingChunks = true;
-
-    console.log(`Starting to process ${pendingChunks.length} chunks`);
-    
-    try {
-        for (let i = 0; i < pendingChunks.length; i++) {
-            if (!sourceBuffer || !mediaSource || mediaSource.readyState !== 'open') {
-                console.error('Invalid source buffer or media source state');
-                break;
-            }
-
-            // Wait if source buffer is updating
-            while (sourceBuffer.updating) {
-                await new Promise(resolve => setTimeout(resolve, 10));
-            }
-
-            try {
-                const chunk = pendingChunks[i];
-                sourceBuffer.appendBuffer(chunk);
-
-                // Wait for the append to complete
-                await new Promise((resolve, reject) => {
-                    sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                    sourceBuffer.addEventListener('error', reject, { once: true });
-                });
-
-                // Log buffer status
-                if (sourceBuffer.buffered.length > 0) {
-                    const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                    console.log(`Processed chunk ${i + 1}/${pendingChunks.length}, buffer end: ${end.toFixed(2)}s`);
-                }
-
-            } catch (e) {
-                if (e.name === 'QuotaExceededError') {
-                    // Handle quota exceeded by removing old buffer
-                    if (sourceBuffer.buffered.length > 0) {
-                        const currentTime = player.currentTime();
-                        const start = sourceBuffer.buffered.start(0);
-                        const removeEnd = Math.max(start, currentTime - 10);
-
-                        await new Promise(resolve => {
-                            sourceBuffer.remove(start, removeEnd);
-                            sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                        });
-
-                        // Retry this chunk
-                        i--;
-                    }
-                } else {
-                    console.error(`Error processing chunk ${i + 1}:`, e);
-                }
-            }
-        }
-
-        // Clear processed chunks
-        pendingChunks = [];
-        
-        // Don't end the stream immediately
-        if (receivedSize >= expectedSize) {
-            // Wait a bit to ensure all data is properly buffered
-            setTimeout(() => {
-                if (mediaSource && mediaSource.readyState === 'open') {
-                    console.log('All chunks processed, ending stream');
-                    mediaSource.endOfStream();
-                }
-            }, 2000);
-        }
-
-    } catch (error) {
-        console.error('Error in processAllChunks:', error);
-    } finally {
-        isProcessingChunks = false;
-    }
-}
-
-// Helper function to handle video chunk data
-function handleVideoChunk(data) {
-    const chunk = new Uint8Array(data.data);
-    
-    // Split large chunks into smaller segments
-    if (chunk.byteLength > MAX_SEGMENT_SIZE) {
-        let offset = 0;
-        while (offset < chunk.byteLength) {
-            const size = Math.min(MAX_SEGMENT_SIZE, chunk.byteLength - offset);
-            const segment = new Uint8Array(chunk.buffer, offset, size);
-            pendingChunks.push(segment);
-            offset += size;
-        }
+    // If we get here, the format is not directly supported
+    return {
+      compatible: false,
+      recommendedFormat: this.getRecommendedFormat()
+    };
+  }
+  
+  /**
+   * Get the recommended format for this browser
+   */
+  getRecommendedFormat() {
+    // Return the best supported format for this browser
+    if (this.supportedFormats.webmVP9.supported) {
+      return 'webm (VP9)';
+    } else if (this.supportedFormats.webm.supported) {
+      return 'webm (VP8)';
+    } else if (this.supportedFormats.mp4.supported) {
+      return 'mp4 (H.264)';
     } else {
-        pendingChunks.push(chunk);
+      return 'mp4 or webm';
     }
+  }
+  
+  /**
+   * Show compatibility warning in UI
+   */
+  showCompatibilityWarning(fileInfo) {
+    notyf.warning(`This video format (${fileInfo.format}) may not be compatible with all browsers. We recommend using ${fileInfo.recommendedFormat} for best compatibility.`);
     
-    receivedSize += chunk.byteLength;
-    console.log(`Segmented chunk into ${pendingChunks.length} pieces`);
-
-    if (!sourceBuffer.updating) {
-        processNextSegment();
+    // Add a more detailed warning in the UI
+    const warningDiv = document.createElement('div');
+    warningDiv.className = 'alert alert-warning mt-3';
+    warningDiv.innerHTML = `
+      <strong>Compatibility Warning:</strong>
+      <p>The video format you're sharing (${fileInfo.format}) may not play correctly in all browsers.</p>
+      <p>For best compatibility, we recommend using ${fileInfo.recommendedFormat}.</p>
+      <p>You can continue anyway, but some participants may have issues playing the video.</p>
+    `;
+    
+    // Add to the UI near the video player
+    const container = document.querySelector('.video-player-container');
+    if (container) {
+      container.appendChild(warningDiv);
+      
+      // Remove after 10 seconds
+      setTimeout(() => {
+        warningDiv.remove();
+      }, 10000);
     }
+  }
 }
 
-// Process segments sequentially
-async function processNextSegment() {
-    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0) {
-        return;
-    }
-
+// Initialize the application when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+  window.localParty = new LocalParty();
+});},
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' }
+      ]
+    /**
+   * Start streaming video to a peer
+   */
+  async startStreamingTo(conn) {
     try {
-        const segment = pendingChunks[0];
-        sourceBuffer.appendBuffer(segment);
+      if (!this.videoFile) {
+        throw new Error('No video file available');
+      }
 
-        // Wait for segment to be processed
-        await new Promise((resolve, reject) => {
-            const handleUpdate = () => {
-                sourceBuffer.removeEventListener('updateend', handleUpdate);
-                sourceBuffer.removeEventListener('error', handleError);
-                resolve();
-            };
+      console.log('Starting video stream with file:', this.videoFile.name);
 
-            const handleError = (error) => {
-                sourceBuffer.removeEventListener('updateend', handleUpdate);
-                sourceBuffer.removeEventListener('error', handleError);
-                reject(error);
-            };
+      // Start time for speed calculation
+      this.transferStartTime = Date.now();
+      
+      // Get proper MIME type from file
+      const mimeType = this.getVideoMimeType(this.videoFile);
 
-            sourceBuffer.addEventListener('updateend', handleUpdate);
-            sourceBuffer.addEventListener('error', handleError);
+      // Send metadata
+      const metadata = {
+        type: 'video-metadata',
+        name: this.videoFile.name,
+        size: this.videoFile.size,
+        mimeType: mimeType,
+        lastModified: this.videoFile.lastModified
+      };
+      
+      console.log('Sending metadata:', metadata);
+      conn.send(metadata);
+
+      // Add delay to ensure metadata is processed
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Stream chunks
+      let offset = 0;
+      let chunksCount = 0;
+      let chunkStartTime = Date.now();
+      
+      while (offset < this.videoFile.size) {
+        // Calculate optimal chunk size based on network speed
+        if (chunksCount > 0 && chunksCount % 5 === 0) {
+          this.adjustChunkSize(offset, Date.now() - this.transferStartTime);
+        }
+        
+        // Slice the file
+        const chunkEnd = Math.min(offset + this.dynamicChunkSize, this.videoFile.size);
+        const chunk = this.videoFile.slice(offset, chunkEnd);
+        const buffer = await chunk.arrayBuffer();
+        
+        // Send the chunk
+        conn.send({
+          type: 'video-chunk',
+          data: buffer,
+          offset: offset,
+          total: this.videoFile.size
         });
-
-        // Remove processed segment
-        pendingChunks.shift();
-
-        // Log buffer status
-        if (sourceBuffer.buffered.length > 0) {
-            const start = sourceBuffer.buffered.start(0);
-            const end = sourceBuffer.buffered.end(0);
-            console.log(`Buffer range: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
+        
+        // Update offset and transfer stats
+        offset += buffer.byteLength;
+        chunksCount++;
+        
+        // Update progress in chat
+        if (chunksCount % 20 === 0 || offset >= this.videoFile.size) {
+          const progress = Math.round((offset / this.videoFile.size) * 100);
+          const duration = (Date.now() - this.transferStartTime) / 1000;
+          const speed = (offset / duration / (1024 * 1024)).toFixed(2);
+          
+          console.log(`Transfer progress: ${progress}%, Speed: ${speed} MB/s`);
+          if (chunksCount % 50 === 0) {
+            this.app.addLocalMessage(`Sending video: ${progress}% complete (${speed} MB/s)`);
+          }
         }
-
-        // Process next segment if available
-        if (pendingChunks.length > 0) {
-            setTimeout(() => processNextSegment(), 0);
+        
+        // Small delay between chunks to prevent flooding
+        const timeTaken = Date.now() - chunkStartTime;
+        if (timeTaken < 20) { // Ensure at least 20ms between chunks
+          await new Promise(resolve => setTimeout(resolve, 20 - timeTaken));
         }
-
+        chunkStartTime = Date.now();
+      }
+      
+      // Send completion message
+      conn.send({ type: 'video-complete' });
+      
+      // Calculate final stats
+      const totalDuration = (Date.now() - this.transferStartTime) / 1000;
+      const avgSpeed = (this.videoFile.size / totalDuration / (1024 * 1024)).toFixed(2);
+      
+      console.log(`Video transfer complete. Average speed: ${avgSpeed} MB/s`);
+      this.app.addLocalMessage(`Video sent successfully (${avgSpeed} MB/s)`);
+      notyf.success("Video sent to peer");
+      
+    } catch (err) {
+      console.error('Error streaming video:', err);
+      notyf.error("Error streaming video: " + err.message);
+    }
+  }
+  
+  /**
+   * Adjust chunk size based on network conditions
+   */
+  adjustChunkSize(bytesSent, transferTime) {
+    // Calculate transfer speed in bytes per second
+    this.transferSpeed = bytesSent / (transferTime / 1000);
+    
+    const speedMbps = this.transferSpeed / (1024 * 1024);
+    console.log(`Current transfer speed: ${speedMbps.toFixed(2)} MB/s`);
+    
+    // Adjust chunk size based on speed
+    if (speedMbps > 5) { // > 5 MB/s is fast
+      this.dynamicChunkSize = CONFIG.MAX_CHUNK_SIZE;
+    } else if (speedMbps > 1) { // 1-5 MB/s is moderate
+      this.dynamicChunkSize = CONFIG.CHUNK_SIZE;
+    } else { // < 1 MB/s is slow
+      this.dynamicChunkSize = CONFIG.MIN_CHUNK_SIZE;
+    }
+    
+    console.log(`Adjusted chunk size to ${(this.dynamicChunkSize / 1024).toFixed(0)} KB`);
+  }
+  
+  /**
+   * Handle incoming video metadata
+   */
+  handleVideoMetadata(data) {
+    console.log('Processing video metadata:', data);
+    this.expectedSize = data.size;
+    this.videoType = data.mimeType;
+    
+    // Reset state
+    this.pendingChunks = [];
+    this.receivedChunks = [];
+    this.receivedSize = 0;
+    
+    // Initialize MediaSource
+    this.initializeMediaSource(data.mimeType);
+    
+    // Update UI
+    this.app.addLocalMessage(`Receiving video: ${data.name} (${this.formatSize(data.size)})`);
+  }
+  
+  /**
+   * Initialize MediaSource for video playback
+   */
+  async initializeMediaSource(mimeType) {
+    try {
+      // Clean up existing MediaSource
+      if (this.mediaSource) {
+        if (this.mediaSource.readyState === 'open') {
+          try {
+            this.mediaSource.endOfStream();
+          } catch (e) {
+            console.warn('Error ending previous MediaSource:', e);
+          }
+        }
+        
+        if (this.mediaSource.url) {
+          URL.revokeObjectURL(this.mediaSource.url);
+        }
+      }
+      
+      // Create new MediaSource
+      this.mediaSource = new MediaSource();
+      const mediaSourceUrl = URL.createObjectURL(this.mediaSource);
+      
+      // Set player source
+      this.app.player.src({
+        src: mediaSourceUrl,
+        type: mimeType
+      });
+      
+      // Wait for MediaSource to open
+      await new Promise((resolve) => {
+        this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
+      });
+      
+      console.log('MediaSource opened, creating SourceBuffer');
+      
+      // Create appropriate SourceBuffer
+      try {
+        // Format the MIME type properly
+        const formattedMimeType = this.getFormattedMimeType(mimeType);
+        console.log('Using MIME type:', formattedMimeType);
+        
+        this.sourceBuffer = this.mediaSource.addSourceBuffer(formattedMimeType);
+        this.sourceBuffer.mode = 'segments'; // More flexible mode for streaming
+        
+        // Set up updateend event for processing pendingChunks
+        this.sourceBuffer.addEventListener('updateend', () => {
+          this.processNextChunk();
+        });
+        
+        console.log('SourceBuffer created successfully');
+        return true;
+      } catch (e) {
+        console.error('Error creating SourceBuffer:', e);
+        notyf.error("Your browser doesn't support this video format");
+        return false;
+      }
     } catch (error) {
-        if (error.name === 'QuotaExceededError') {
-            // Remove old buffer data
-            if (sourceBuffer.buffered.length > 0) {
-                const currentTime = player.currentTime();
-                const start = sourceBuffer.buffered.start(0);
-                const removeEnd = Math.max(start, currentTime - 10);
-
-                try {
-                    await new Promise(resolve => {
-                        sourceBuffer.remove(start, removeEnd);
-                        sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                    });
-                    // Retry current segment
-                    processNextSegment();
-                } catch (e) {
-                    console.error('Error removing old buffer:', e);
-                }
-            }
-        } else {
-            console.error('Error processing segment:', error);
-        }
+      console.error('MediaSource initialization error:', error);
+      notyf.error("Error initializing video player");
+      return false;
     }
-}
-async function processChunkBatch() {
-    if (!sourceBuffer || sourceBuffer.updating) return;
-
-    console.log(`Adding ${pendingChunks.length} chunks to queue...`);
+  }
+  
+  /**
+   * Get properly formatted MIME type
+   */
+  getFormattedMimeType(mimeType) {
+    // If MIME type already has codecs, use it
+    if (mimeType.includes('codecs=')) {
+      return mimeType;
+    }
     
-    for (const chunk of pendingChunks) {
-        await mediaQueue.addChunk(chunk);
+    // Otherwise, add default codecs based on container
+    if (mimeType.includes('mp4')) {
+      return 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
+    } else if (mimeType.includes('webm')) {
+      return 'video/webm; codecs="vp8,vorbis"';
+    } else if (mimeType.includes('ogg')) {
+      return 'video/ogg; codecs="theora,vorbis"';
+    } else {
+      // Default to MP4 if we can't determine
+      return 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
     }
-    pendingChunks = [];
-}
-// Helper function to append a chunk with retry logic
-async function appendChunkWithRetry(chunk, maxRetries = 3) {
-    let attempt = 0;
-    while (attempt < maxRetries) {
-        try {
-            await new Promise((resolve, reject) => {
-                if (!sourceBuffer || mediaSource.readyState !== 'open') {
-                    reject(new Error('Source buffer or media source not ready'));
-                    return;
-                }
-
-                const handleUpdateEnd = () => {
-                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                    sourceBuffer.removeEventListener('error', handleError);
-                    resolve();
-                };
-
-                const handleError = (err) => {
-                    sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
-                    sourceBuffer.removeEventListener('error', handleError);
-                    reject(err);
-                };
-
-                sourceBuffer.addEventListener('updateend', handleUpdateEnd);
-                sourceBuffer.addEventListener('error', handleError);
-
-                sourceBuffer.appendBuffer(chunk);
-            });
-
-            return; // Success, exit function
-        } catch (e) {
-            attempt++;
-            if (e.name === 'QuotaExceededError') {
-                await handleQuotaExceeded();
-                continue;
-            }
-            if (attempt === maxRetries) throw e;
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait before retry
-        }
+  }
+  
+  /**
+   * Handle incoming video chunk
+   */
+  handleVideoChunk(data) {
+    const chunk = new Uint8Array(data.data);
+    this.pendingChunks.push(chunk);
+    this.receivedSize += chunk.byteLength;
+    
+    // Calculate progress
+    const percentage = ((this.receivedSize / this.expectedSize) * 100).toFixed(1);
+    
+    // Process chunk if source buffer is ready and not updating
+    if (this.sourceBuffer && !this.sourceBuffer.updating) {
+      this.processNextChunk();
     }
-}
-function setupSourceBuffer(mimeType) {
-    if (!mediaSource || mediaSource.readyState !== 'open') return;
-
+    
+    // Update UI periodically (not for every chunk)
+    if (this.pendingChunks.length % 10 === 0 || this.receivedSize >= this.expectedSize) {
+      // Calculate speed
+      const now = Date.now();
+      if (this.lastTransferTime !== 0) {
+        const timeDiff = (now - this.lastTransferTime) / 1000; // seconds
+        const bytesDiff = chunk.byteLength;
+        this.transferSpeed = bytesDiff / timeDiff;
+      }
+      this.lastTransferTime = now;
+      
+      const speed = (this.transferSpeed / (1024 * 1024)).toFixed(2);
+      
+      // Log progress to console
+      console.log(`Received: ${percentage}%, Speed: ${speed} MB/s, Buffer: ${this.pendingChunks.length} chunks`);
+      
+      // Update UI less frequently to avoid flooding
+      if (this.pendingChunks.length % 50 === 0 || this.receivedSize >= this.expectedSize) {
+        this.app.addLocalMessage(`Receiving video: ${percentage}% complete (${speed} MB/s)`);
+      }
+    }
+    
+    // Schedule periodic buffer processing
+    this.scheduleBufferProcessing();
+  }
+  
+  /**
+   * Schedule buffer processing to ensure chunks are processed even when updateend doesn't fire
+   */
+  scheduleBufferProcessing() {
+    if (this.bufferTimeout) {
+      clearTimeout(this.bufferTimeout);
+    }
+    
+    this.bufferTimeout = setTimeout(() => {
+      if (this.sourceBuffer && !this.sourceBuffer.updating && this.pendingChunks.length > 0) {
+        this.processNextChunk();
+      }
+      
+      // Continue scheduling if we have more chunks
+      if (this.pendingChunks.length > 0) {
+        this.scheduleBufferProcessing();
+      }
+    }, 100);
+  }
+  
+  /**
+   * Process next chunk in queue
+   */
+  async processNextChunk() {
+    if (this.isProcessing || !this.sourceBuffer || this.sourceBuffer.updating || this.pendingChunks.length === 0) {
+      return;
+    }
+    
+    this.isProcessing = true;
+    
     try {
-        if (mimeType === 'video/webm') {
-            mimeType = 'video/webm;codecs="vp8,vorbis"';
+      // Get next chunk
+      const chunk = this.pendingChunks.shift();
+      
+      // Append to source buffer
+      this.sourceBuffer.appendBuffer(chunk);
+      
+      // Log buffer status periodically
+      if (this.pendingChunks.length % 20 === 0) {
+        this.logBufferStatus();
+      }
+      
+      // Check if we need to clean up old buffer
+      const currentTime = this.app.player.currentTime();
+      if (this.sourceBuffer.buffered.length > 0) {
+        const bufferEnd = this.sourceBuffer.buffered.end(this.sourceBuffer.buffered.length - 1);
+        const bufferAhead = bufferEnd - currentTime;
+        
+        // If we have more than 30s buffered, clean up old data
+        if (bufferAhead > 30 && currentTime > 10) {
+          // This will be processed in the next updateend event
+          this.clearOldBuffer(currentTime - 5);
         }
+      }
+    } catch (error) {
+      if (error.name === 'QuotaExceededError') {
+        // Handle quota exceeded - remove old buffer data
+        console.warn('Buffer quota exceeded, clearing old data');
+        await this.clearOldBuffer(this.app.player.currentTime() - 10);
         
-        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        // Change to 'segments' mode to handle discontinuous appends
-        sourceBuffer.mode = 'sequence';
-        sourceBuffer.timestampOffset = 0;  
-        console.log('Created source buffer in segments mode');
-        
-        // Initialize timestamp offset to 0
-        sourceBuffer.timestampOffset = 0;
-        
-        sourceBuffer.addEventListener('updateend', () => {
-            if (sourceBuffer.buffered.length > 0) {
-                // Log all current ranges
-                for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                    console.log(`Buffer range ${i}: ${sourceBuffer.buffered.start(i).toFixed(3)}s to ${sourceBuffer.buffered.end(i).toFixed(3)}s`);
-                }
-            }
-        });
-
-        mediaState.isReady = true;
-    } catch (e) {
-        console.error('Error setting up source buffer:', e);
-        mediaState.hasError = true;
+        // Put the chunk back
+        this.pendingChunks.unshift(chunk);
+      } else {
+        console.error('Error processing chunk:', error);
+      }
+    } finally {
+      this.isProcessing = false;
+      
+      // Process more chunks if available and buffer is not updating
+      if (this.pendingChunks.length > 0 && this.sourceBuffer && !this.sourceBuffer.updating) {
+        setTimeout(() => this.processNextChunk(), 0);
+      }
     }
-}
-// Helper function to handle video complete event
-function handleVideoComplete() {
+  }
+  
+  /**
+   * Clear old buffer data
+   */
+  async clearOldBuffer(beforeTime) {
+    if (!this.sourceBuffer || this.sourceBuffer.updating || !this.sourceBuffer.buffered.length) {
+      return;
+    }
+    
+    const start = this.sourceBuffer.buffered.start(0);
+    
+    if (start < beforeTime) {
+      return new Promise((resolve) => {
+        const handleUpdateEnd = () => {
+          this.sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+          resolve();
+        };
+        
+        this.sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+        this.sourceBuffer.remove(start, beforeTime);
+      });
+    }
+  }
+  
+  /**
+   * Handle video complete event
+   */
+  handleVideoComplete() {
     console.log('Video transfer complete');
     
-    // Only end the stream if we've processed all segments and the buffer is stable
-    const checkComplete = setInterval(() => {
-        if (pendingChunks.length === 0 && !sourceBuffer.updating) {
-            clearInterval(checkComplete);
-            if (mediaSource && mediaSource.readyState === 'open') {
-                setTimeout(() => {
-                    mediaSource.endOfStream();
-                }, 1000);
-            }
-        }
-    }, 500);
-}
-
-function removeOldBufferData(currentTime) {
-    if (!sourceBuffer || !sourceBuffer.buffered.length) return;
-    
-    const bufferedStart = sourceBuffer.buffered.start(0);
-    const removeEnd = Math.max(bufferedStart, currentTime - 10);
-    
-    if (removeEnd > bufferedStart) {
-        sourceBuffer.remove(bufferedStart, removeEnd);
-    }
-}
-
-function initializePlayerEvents() {
-    if (!player) return;
-
-    player.on('waiting', () => {
-        console.log('Video waiting for data');
-        
-        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-            const currentTime = player.currentTime();
-            
-            console.log('Current source buffer state:', sourceBuffer.updating ? 'updating' : 'idle');
-            console.log('Pending chunks:', pendingChunks.length);
-            
-            // Log all buffer ranges
-            let hasValidRange = false;
-            for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-                const start = sourceBuffer.buffered.start(i);
-                const end = sourceBuffer.buffered.end(i);
-                console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-                
-                if (currentTime >= start && currentTime <= end) {
-                    hasValidRange = true;
-                }
-            }
-            
-            // If we have pending chunks, process them regardless of valid range
-            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                console.log('Processing pending chunks...');
-                processChunkBatch(); // Use batch processing instead of single chunks
-            } else if (!hasValidRange) {
-                console.log('No valid range for current time:', currentTime);
-            }
-        } else {
-            console.log('No buffered ranges available');
-            // If we have chunks but no buffer, start processing
-            if (pendingChunks.length > 0 && sourceBuffer && !sourceBuffer.updating) {
-                console.log('Starting initial chunk processing...');
-                processChunkBatch();
-            }
-        }
-    });
-
-    // Add canplay handler
-    player.on('canplay', () => {
-        console.log('Video can play - enabling play button');
-        if (player.controlBar && player.controlBar.playToggle) {
-            player.controlBar.playToggle.enable();
-        }
-    });
-
-    player.on('error', (error) => {
-        console.error('Player error:', error);
-        console.log('Source buffer state:', sourceBuffer ? sourceBuffer.updating : 'no source buffer');
-        console.log('Media source state:', mediaSource ? mediaSource.readyState : 'no media source');
-    });
-
-    player.on('timeupdate', () => {
-        if (Math.floor(player.currentTime()) % 30 === 0) {
-            removeOldBufferData(player.currentTime());
-        }
-    });
-
-    player.on('dispose', () => {
-        if (mediaSource && mediaSource.readyState === 'open') {
-            mediaSource.endOfStream();
-        }
-        if (mediaState.mediaSourceUrl) {
-            URL.revokeObjectURL(mediaState.mediaSourceUrl);
-        }
-    });
-
-    // Add play handler
-    player.on('play', () => {
-        console.log('Play event triggered');
-        if (pendingChunks.length > 0 && sourceBuffer && !sourceBuffer.updating) {
-            console.log('Processing chunks on play');
-            processChunkBatch();
-        }
-    });
-}
-// Helper function to handle chat messages
-function handleChatMessage(data) {
-    append({
-        name: data.username,
-        content: data.message,
-        pfp: data.pfp || '#f3dfbf'
-    });
-}
-
-// Helper function to handle connection close
-function handleConnectionClose(conn) {
-    console.log('Connection closed:', conn.peer);
-    delete connections[conn.peer];
-    
-    if (mediaState.mediaSourceUrl) {
-        URL.revokeObjectURL(mediaState.mediaSourceUrl);
+    // Check if we have all the data
+    if (this.receivedSize < this.expectedSize) {
+      console.warn(`Received only ${this.receivedSize}/${this.expectedSize} bytes`);
+      this.app.addLocalMessage(`Video transfer incomplete. Received ${this.formatSize(this.receivedSize)}/${this.formatSize(this.expectedSize)}`);
+      return;
     }
     
-    append({
-        name: 'Local Party',
-        content: 'A user has disconnected.',
-        pfp: '#f3dfbf'
-    });
-}
-
-// Helper function to handle connection errors
-function handleConnectionError(conn, err) {
-    console.error('Connection error:', err);
-    mediaState.hasError = true;
-    notyf.error("Connection error occurred");
+    // Process all pending chunks
+    this.processPendingChunks();
     
-    // Clean up
-    delete connections[conn.peer];
-    if (mediaState.mediaSourceUrl) {
-        URL.revokeObjectURL(mediaState.mediaSourceUrl);
+    // Show completion message
+    this.app.addLocalMessage('Video transfer complete. Ready to play!');
+    
+    // Enable play button if it's disabled
+    if (this.app.player.controlBar && this.app.player.controlBar.playToggle) {
+      this.app.player.controlBar.playToggle.enable();
     }
-}
-// State management object
-const mediaState = {
-    isReady: false,
-    hasError: false,
-    mediaSourceReady: false,
-    sourceBufferReady: false,
-    isInitializing: false,
-    mediaSourceUrl: null,
-    initComplete: false
-};
-
-// Function to set up MediaSource and SourceBuffer
-async function setupMediaSource(videoElement, mimeType) {
-    return new Promise((resolve, reject) => {
-        try {
-            // Reset state
-            mediaState.isReady = false;
-            mediaState.hasError = false;
-            mediaState.initComplete = false;
-
-            // Cleanup existing MediaSource
-            if (mediaSource) {
-                try {
-                    if (mediaSource.readyState === 'open') {
-                        mediaSource.endOfStream();
-                    }
-                } catch (e) {
-                    console.warn('Error cleaning up old MediaSource:', e);
-                }
-                if (mediaState.mediaSourceUrl) {
-                    URL.revokeObjectURL(mediaState.mediaSourceUrl);
-                }
-            }
-
-            // Create new MediaSource
-            mediaSource = new MediaSource();
-            mediaState.mediaSourceUrl = URL.createObjectURL(mediaSource);
-            console.log('Created new MediaSource');
-
-            let setupComplete = false;
-
-            const handleSourceOpen = async () => {
-                // Prevent multiple executions
-                if (setupComplete) return;
-                setupComplete = true;
-
-                // Remove the event listener immediately
-                mediaSource.removeEventListener('sourceopen', handleSourceOpen);
-
-                try {
-                    console.log('MediaSource opened');
-                    
-                    // Set up SourceBuffer only if it doesn't exist
-                    if (!sourceBuffer) {
-                        const finalMimeType = mimeType === 'video/webm' ? 
-                            'video/webm;codecs="vp8,vorbis"' : mimeType;
-
-                        sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
-                        sourceBuffer.mode = 'sequence';
-                        sourceBuffer.timestampOffset = 0;  
-                        console.log('SourceBuffer created');
-
-                        // Add updateend listener only once
-                        sourceBuffer.addEventListener('updateend', () => {
-                            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                                processNextChunk();
-                            }
-                        });
-                    }
-
-                    // Update player source only if needed
-                    if (player && player.currentSrc() !== mediaState.mediaSourceUrl) {
-                        player.src({
-                            src: mediaState.mediaSourceUrl,
-                            type: mimeType
-                        });
-                    }
-
-                    mediaState.isReady = true;
-                    resolve();
-                } catch (error) {
-                    console.error('Error in sourceopen:', error);
-                    mediaState.hasError = true;
-                    reject(error);
-                }
+  }
+  
+  /**
+   * Process all pending chunks
+   */
+  async processPendingChunks() {
+    // Process chunks in batches to avoid UI freezing
+    const processChunkBatch = async (startIndex, batchSize) => {
+      const endIndex = Math.min(startIndex + batchSize, this.pendingChunks.length);
+      
+      for (let i = startIndex; i < endIndex; i++) {
+        if (!this.sourceBuffer || this.sourceBuffer.updating) {
+          await new Promise(resolve => {
+            const handleUpdateEnd = () => {
+              this.sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+              resolve();
             };
-
-            // Add the sourceopen listener with once option
-            mediaSource.addEventListener('sourceopen', handleSourceOpen, { once: true });
-            
-            // Set video element source
-            videoElement.src = mediaState.mediaSourceUrl;
-
-        } catch (error) {
-            console.error('Error in setupMediaSource:', error);
-            mediaState.hasError = true;
-            reject(error);
+            this.sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+          });
         }
-    });
-}
-// Helper function to get proper MIME type and codecs
-function getVideoMimeType(file) {
+        
+        try {
+          this.sourceBuffer.appendBuffer(this.pendingChunks[i]);
+          
+          await new Promise(resolve => {
+            const handleUpdateEnd = () => {
+              this.sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+              resolve();
+            };
+            this.sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+          });
+        } catch (error) {
+          if (error.name === 'QuotaExceededError') {
+            // Handle quota exceeded - remove old buffer data
+            await this.clearOldBuffer(this.app.player.currentTime() - 10);
+            i--; // Retry this chunk
+          } else {
+            console.error('Error processing chunk:', error);
+          }
+        }
+      }
+      
+      // Process next batch if there are more chunks
+      if (endIndex < this.pendingChunks.length) {
+        setTimeout(() => processChunkBatch(endIndex, batchSize), 10);
+      } else {
+        // All chunks processed, end the stream
+        this.pendingChunks = [];
+        
+        // Wait a bit before ending the stream to ensure all data is properly buffered
+        setTimeout(() => {
+          if (this.mediaSource && this.mediaSource.readyState === 'open') {
+            try {
+              this.mediaSource.endOfStream();
+              console.log('MediaSource stream ended');
+            } catch (e) {
+              console.warn('Error ending MediaSource stream:', e);
+            }
+          }
+        }, 2000);
+      }
+    };
+    
+    // Start processing in batches of 10
+    processChunkBatch(0, 10);
+  }
+  
+  /**
+   * Handle video playback buffering
+   */
+  handleBuffering() {
+    console.log('Handling video buffering');
+    
+    if (!this.sourceBuffer) return;
+    
+    // Log current buffer status
+    this.logBufferStatus();
+    
+    // Try to process more chunks if available
+    if (this.pendingChunks.length > 0 && !this.sourceBuffer.updating) {
+      this.processNextChunk();
+    }
+  }
+  
+  /**
+   * Handle video playback error
+   */
+  handlePlaybackError() {
+    console.error('Video playback error');
+    
+    if (this.mediaSource && this.mediaSource.readyState === 'open') {
+      // Try to recover by processing more chunks
+      if (this.pendingChunks.length > 0) {
+        this.processNextChunk();
+      }
+    } else {
+      // Media source is closed or in error state, try to reinitialize
+      notyf.error("Playback error. Trying to recover...");
+      
+      // Reinitialize with a delay
+      setTimeout(() => {
+        this.initializeMediaSource(this.videoType);
+      }, 1000);
+    }
+  }
+  
+  /**
+   * Log buffer status
+   */
+  logBufferStatus() {
+    if (!this.sourceBuffer || !this.sourceBuffer.buffered.length) return;
+    
+    const currentTime = this.app.player.currentTime();
+    console.log("Buffer Status:");
+    
+    // Log all buffer ranges
+    for (let i = 0; i < this.sourceBuffer.buffered.length; i++) {
+      const start = this.sourceBuffer.buffered.start(i);
+      const end = this.sourceBuffer.buffered.end(i);
+      console.log(`Range ${i}: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
+    }
+    
+    // Calculate buffer ahead
+    let bufferAhead = 0;
+    for (let i = 0; i < this.sourceBuffer.buffered.length; i++) {
+      const start = this.sourceBuffer.buffered.start(i);
+      const end = this.sourceBuffer.buffered.end(i);
+      
+      if (currentTime >= start && currentTime <= end) {
+        bufferAhead = end - currentTime;
+        break;
+      }
+    }
+    
+    console.log(`Current position: ${currentTime.toFixed(2)}s`);
+    console.log(`Buffered ahead: ${bufferAhead.toFixed(2)}s`);
+    console.log(`Pending chunks: ${this.pendingChunks.length}`);
+    console.log(`Received: ${this.receivedSize}/${this.expectedSize} bytes (${((this.receivedSize/this.expectedSize)*100).toFixed(1)}%)`);
+  }
+  
+  /**
+   * Get MIME type for video file
+   */
+  getVideoMimeType(file) {
     // Start with the file's type
     let mimeType = file.type;
     
-    // If file.type is empty or generic "video", try to detect from extension
+    // If file.type is empty or generic, try to detect from extension
     if (!mimeType || mimeType === 'video' || mimeType === 'video/') {
-        const ext = file.name.split('.').pop().toLowerCase();
-        switch (ext) {
-            case 'mp4':
-                mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
-                break;
-            case 'webm':
-                mimeType = 'video/webm; codecs="vp8, vorbis"';
-                break;
-             case 'webmvp9':
-               mimeType = 'video/webm; codecs="vp9, opus"';
-                break;
-            case 'ogg':
-                mimeType = 'video/ogg; codecs="theora, vorbis"';
-                break;
-            case 'mov':
-                mimeType = 'video/quicktime';
-                break;
-            case 'mkv':
-                mimeType = 'video/x-matroska';
-                break;
-            case 'avi':
-                mimeType = 'video/x-msvideo';
-                break;
-            case '3gp':
-                mimeType = 'video/3gpp';
-                break;
-            default:
-                // Default to MP4 if we can't detect
-                mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
-        }
+      const ext = file.name.split('.').pop().toLowerCase();
+      switch (ext) {
+        case 'mp4':
+          mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+          break;
+        case 'webm':
+          mimeType = 'video/webm; codecs="vp8, vorbis"';
+          break;
+        case 'ogg':
+          mimeType = 'video/ogg; codecs="theora, vorbis"';
+          break;
+        case 'mov':
+          mimeType = 'video/quicktime';
+          break;
+        case 'mkv':
+          mimeType = 'video/x-matroska';
+          break;
+        default:
+          // Default to MP4 if we can't detect
+          mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
+      }
     }
     
     console.log('Detected MIME type:', mimeType, 'for file:', file.name);
     return mimeType;
-}
-
-
-// Update startStreamingTo to use proper MIME type
-async function startStreamingTo(conn) {
-    try {
-        if (!videoFile) {
-            throw new Error('No video file available');
-        }
-
-        console.log('Starting video stream with file:', videoFile);
-
-        // Get proper MIME type from file
-        const mimeType = getVideoMimeType(videoFile);
-
-        // Send metadata with proper MIME type
-        const metadata = {
-            type: 'video-metadata',
-            name: videoFile.name,
-            size: videoFile.size,
-            mimeType: mimeType,
-            lastModified: videoFile.lastModified
-        };
-        
-        console.log('Sending metadata:', metadata);
-        conn.send(metadata);
-
-        // Add delay to ensure metadata is processed
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // Stream chunks
-        let offset = 0;
-        while (offset < videoFile.size) {
-            const chunk = videoFile.slice(offset, offset + CHUNK_SIZE);
-            const buffer = await chunk.arrayBuffer();
-            
-            conn.send({
-                type: 'video-chunk',
-                data: buffer,
-                offset: offset,
-                total: videoFile.size
-            });
-            
-            offset += buffer.byteLength;
-            await new Promise(resolve => setTimeout(resolve, 50));
-        }
-        
-        conn.send({ type: 'video-complete' });
-        notyf.success("Video sent to peer");
-    } catch (err) {
-        console.error('Error streaming video:', err);
-        notyf.error("Error streaming video: " + err.message);
+  }
+  
+  /**
+   * Format bytes to human-readable size
+   */
+  formatSize(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+  
+  /**
+   * Clean up and destroy the media manager
+   */
+  destroy() {
+    // Clear any pending timeouts
+    if (this.bufferTimeout) {
+      clearTimeout(this.bufferTimeout);
     }
-}
-
-
-// Handle incoming video metadata
-function handleVideoMetadata(data) {
-    console.log('Processing metadata:', data);
-    expectedSize = data.size;
+    
+    // Clean up MediaSource
+    if (this.mediaSource) {
+      if (this.mediaSource.readyState === 'open') {
+        try {
+          this.mediaSource.endOfStream();
+        } catch (e) {
+          console.warn('Error ending MediaSource:', e);
+        }
+      }
+      
+      if (this.mediaSource.url) {
+        URL.revokeObjectURL(this.mediaSource.url);
+      }
+    }
     
     // Reset state
-    pendingChunks = [];
-    receivedSize = 0;
-    
-    try {
-        // Clean up existing MediaSource
-        if (mediaSource) {
-            if (mediaSource.readyState === 'open') {
-                mediaSource.endOfStream();
-            }
-            if (mediaState.mediaSourceUrl) {
-                URL.revokeObjectURL(mediaState.mediaSourceUrl);
-            }
-        }
-
-        // Create new MediaSource
-        mediaSource = new MediaSource();
-        mediaState.mediaSourceUrl = URL.createObjectURL(mediaSource);
-        videoElement.src = mediaState.mediaSourceUrl;
-
-        mediaSource.addEventListener('sourceopen', () => {
-            setupSourceBuffer(data.mimeType);
-        }, { once: true });
-
-        return true;
-    } catch (error) {
-        console.error('Error in handleVideoMetadata:', error);
-        mediaState.hasError = true;
-        return false;
-    }
+    this.pendingChunks = [];
+    this.receivedChunks = [];
+    this.sourceBuffer = null;
+    this.mediaSource = null;
+  }
 }
+  }
+};
 
-
-// Process next chunk in queue
-// Improved chunk processing function with better buffer management
-async function processNextChunk() {
-    if (!sourceBuffer || sourceBuffer.updating || pendingChunks.length === 0) {
-        return;
+// Initialize Notyf for notifications
+const notyf = new Notyf({ 
+  duration: 2000, 
+  position: { x: 'center', y: 'top' },
+  types: [
+    {
+      type: 'warning',
+      background: '#FFA500',
+      duration: 3000
+    },
+    {
+      type: 'info',
+      background: '#3498db',
+      duration: 2000
     }
-
-    try {
-        const chunk = pendingChunks.shift();
-        sourceBuffer.appendBuffer(chunk);
-    } catch (e) {
-        if (e.name === 'QuotaExceededError') {
-            // Clean up old data before retrying
-            const currentTime = player.currentTime();
-            await new Promise(resolve => {
-                removeOldBufferData(currentTime);
-                sourceBuffer.addEventListener('updateend', resolve, { once: true });
-            });
-            // Put chunk back at front of queue
-            pendingChunks.unshift(chunk);
-        } else {
-            console.error('Error appending buffer:', e);
-        }
-    }
-}
-// Function to handle video metadata with proper initialization
-async function initializeMediaSource(videoElement, mimeType) {
-    if (mediaState.isInitializing) {
-        console.log('Already initializing media source');
-        return false;
-    }
-
-    mediaState.isInitializing = true;
-    console.log('Starting media source initialization');
-
-    try {
-        // Clean up existing media source
-        if (mediaSource) {
-            try {
-                if (mediaSource.readyState === 'open') {
-                    mediaSource.endOfStream();
-                }
-            } catch (e) {
-                console.warn('Error cleaning up old MediaSource:', e);
-            }
-            if (mediaState.mediaSourceUrl) {
-                URL.revokeObjectURL(mediaState.mediaSourceUrl);
-            }
-        }
-
-        // Reset state
-        sourceBuffer = null;
-        mediaSource = new MediaSource();
-        mediaState.mediaSourceUrl = URL.createObjectURL(mediaSource);
-
-        await new Promise((resolve, reject) => {
-            const sourceOpenHandler = () => {
-                try {
-                    console.log('MediaSource opened');
-                    
-                    // Set up source buffer
-                    const finalMimeType = mimeType === 'video/webm' ? 
-                        'video/webm;codecs="vp8,vorbis"' : mimeType;
-                    
-                    sourceBuffer = mediaSource.addSourceBuffer(finalMimeType);
-                    sourceBuffer.mode = 'sequence';
-                    sourceBuffer.timestampOffset = 0;  
-                    console.log('SourceBuffer created successfully');
-
-                    // Set up source buffer event listeners
-                    sourceBuffer.addEventListener('updateend', () => {
-                        if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                            processNextChunk();
-                        }
-                    });
-
-                    // Update player source
-                    if (player) {
-                        player.src({
-                            src: mediaState.mediaSourceUrl,
-                            type: finalMimeType
-                        });
-                    }
-
-                    resolve();
-                } catch (error) {
-                    reject(error);
-                }
-            };
-
-            mediaSource.addEventListener('sourceopen', sourceOpenHandler, { once: true });
-            videoElement.src = mediaState.mediaSourceUrl;
-        });
-
-        mediaState.isInitializing = false;
-        mediaState.isReady = true;
-        console.log('Media source initialization complete');
-        return true;
-
-    } catch (error) {
-        console.error('Media source initialization failed:', error);
-        mediaState.hasError = true;
-        mediaState.isInitializing = false;
-        mediaState.isReady = false;
-        throw error;
-    }
-}
-
-async function retryInitialization(videoElement, mimeType, maxRetries = 3) {
-    let attempts = 0;
-    
-    while (attempts < maxRetries) {
-        try {
-            console.log(`Attempt ${attempts + 1} of ${maxRetries} to initialize media source`);
-            
-            // Reset state
-            mediaState.isReady = false;
-            mediaState.hasError = false;
-            mediaState.isInitializing = false;
-            pendingChunks = [];
-            receivedSize = 0;
-            
-            const success = await initializeMediaSource(videoElement, mimeType);
-            if (success) {
-                console.log('Media source initialization succeeded');
-                return true;
-            }
-        } catch (error) {
-            console.error(`Attempt ${attempts + 1} failed:`, error);
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait before retry
-        }
-        attempts++;
-    }
-    
-    console.error('All initialization attempts failed');
-    return false;
-}
-// Helper function to handle quota exceeded error
-async function handleQuotaExceeded() {
-    if (!sourceBuffer || !sourceBuffer.buffered.length) return;
-
-    const currentTime = player.currentTime();
-    const start = sourceBuffer.buffered.start(0);
-    const removeEnd = Math.max(start, currentTime - 5);
-
-    if (removeEnd > start) {
-        await new Promise((resolve, reject) => {
-            sourceBuffer.remove(start, removeEnd);
-            sourceBuffer.addEventListener('updateend', resolve, { once: true });
-            sourceBuffer.addEventListener('error', reject, { once: true });
-        });
-    }
-}
-
-
-// Helper function to append buffer with promise
-function appendBufferAsync(chunk) {
-    return new Promise((resolve, reject) => {
-        if (!sourceBuffer || mediaSource.readyState !== 'open') {
-            reject(new Error('Invalid source buffer state'));
-            return;
-        }
-
-        try {
-            const handleUpdate = () => {
-                sourceBuffer.removeEventListener('updateend', handleUpdate);
-                sourceBuffer.removeEventListener('error', handleError);
-                resolve();
-            };
-
-            const handleError = (e) => {
-                sourceBuffer.removeEventListener('updateend', handleUpdate);
-                sourceBuffer.removeEventListener('error', handleError);
-                reject(e);
-            };
-
-            sourceBuffer.addEventListener('updateend', handleUpdate);
-            sourceBuffer.addEventListener('error', handleError);
-            sourceBuffer.appendBuffer(chunk);
-
-        } catch (e) {
-            reject(e);
-        }
-    });
-}
-
-// Helper function to check if stream is complete
-function isStreamComplete() {
-    return (
-        receivedSize >= expectedSize && 
-        pendingChunks.length === 0 && 
-        sourceBuffer && 
-        !sourceBuffer.updating
-    );
-}
-
-// Add buffer monitoring to the player
-// Update setupBufferMonitoring to be more defensive
-function setupBufferMonitoring() {
-    if (!player) return;
-
-    // Check buffer status every 500ms
-    setInterval(() => {
-        if (sourceBuffer && player) {
-            const currentTime = player.currentTime();
-            removeOldBufferData(currentTime);
-
-            // Rest of buffer monitoring logic...
-            if (sourceBuffer.buffered.length > 0) {
-                const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                const bufferAhead = bufferedEnd - currentTime;
-                
-                console.log(`Buffer status: ${bufferAhead.toFixed(2)}s ahead, ` +
-                          `${pendingChunks.length} chunks remaining, ` +
-                          `${receivedSize}/${expectedSize} bytes received`);
-            }
-        }
-    }, 500);
-    
-    // Handle waiting events more aggressively
-player.on('waiting', () => {
-    console.log('Video waiting for data');
-    
-    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-        const currentTime = player.currentTime();
-        
-        // Log all buffer ranges
-        let hasValidRange = false;
-        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-            const start = sourceBuffer.buffered.start(i);
-            const end = sourceBuffer.buffered.end(i);
-            console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-            
-            if (currentTime >= start && currentTime <= end) {
-                hasValidRange = true;
-            }
-        }
-        
-        if (!hasValidRange && pendingChunks.length > 0) {
-            console.log('Current time outside buffered ranges, processing more chunks');
-            processNextChunk();
-        }
-    }
+  ]
 });
 
-    // Cleanup on player dispose
-    player.on('dispose', () => {
-        clearInterval(bufferInterval);
-    });
-}
-// Add a buffer check function
-function checkBuffer() {
-    if (!mediaState.isReady || !sourceBuffer) return;
-
-    try {
-        if (sourceBuffer.buffered.length > 0) {
-            const currentTime = player.currentTime();
-            const bufferedEnd = sourceBuffer.buffered.end(0);
-            const bufferAhead = bufferedEnd - currentTime;
-
-            if (bufferAhead < 2 && pendingChunks.length > 0) {
-                processNextChunk();
-            }
-        }
-    } catch (e) {
-        console.warn('Buffer check error:', e);
-    }
-}
-
-
-
-// Handle incoming video chunk
-function handleVideoChunk(data) {
-    const chunk = new Uint8Array(data.data);
-    pendingChunks.push(chunk);
-    receivedSize += chunk.byteLength;
-
-    const percentage = ((receivedSize / expectedSize) * 100).toFixed(1);
-    console.log(`Received chunk: ${receivedSize}/${expectedSize} bytes (${percentage}%)`);
-
-    // Process immediately if possible
-    if (mediaState.isReady && sourceBuffer && !sourceBuffer.updating) {
-        processNextChunk();
-    }
-}
-
-function initializePlayerControls() {
-    if (!player) return;
+/**
+ * Main application class
+ */
+class LocalParty {
+  constructor() {
+    // App state
+    this.isHost = false;
+    this.connectionManager = null;
+    this.mediaManager = null;
+    this.videoFile = null;
+    this.roomName = '';
+    this.username = '';
+    this.compatibilityHelper = null;
+    this.allowEmit = true;
     
-    // Initially disable play button until we have enough data
-    player.controlBar.playToggle.disable();
+    // UI elements
+    this.ui = {
+      pages: {
+        landing: document.getElementById("landing"),
+        create: document.getElementById("create"),
+        join: document.getElementById("join"),
+        room: document.getElementById("room")
+      },
+      videoPlayer: document.getElementById("video-player"),
+      messagesBox: document.getElementById("messages-box"),
+      roomNameText: document.getElementById("roomNameText"),
+      roomCodeText: document.getElementById("roomCodeText"),
+      peopleInParty: document.getElementById("pplinparty")
+    };
     
-    player.on('canplay', () => {
-        console.log('Video can play');
-        player.controlBar.playToggle.enable();
-    });
-    
-    player.on('playing', () => {
-        console.log('Video started playing');
-    });
-    
-    player.on('error', (e) => {
-        console.error('Player error:', e);
-    });
-}
-// Handle video controls
-function handleVideoControl(data) {
-    if (!allowEmit || !player) return;
-    
-    allowEmit = false;  // Prevent echo
+    // Initialize the app
+    this.init();
+  }
+  
+  /**
+   * Initialize the application
+   */
+  init() {
+    console.log('Initializing Local Party application...');
     
     try {
-        // Always sync time first
-        if (Math.abs(player.currentTime() - data.time) > 0.5) {
-            console.log(`Syncing time from ${player.currentTime()} to ${data.time}`);
-            player.currentTime(data.time);
-        }
-
-        // Then handle play/pause
-        if (data.action === 'play' && player.paused()) {
-            console.log('Remote play command received');
-            player.play().catch(e => console.error('Play failed:', e));
-            const content = time("played", data.username || "Someone", data.time);
-            append({
-                name: "Local Party",
-                content: content,
-                pfp: "#f3dfbf"
-            });
-        } else if (data.action === 'pause' && !player.paused()) {
-            console.log('Remote pause command received');
-            player.pause();
-            const content = time("paused", data.username || "Someone", data.time);
-            append({
-                name: "Local Party",
-                content: content,
-                pfp: "#f3dfbf"
-            });
-        }
-    } catch (e) {
-        console.error('Error handling video control:', e);
+      // Initialize format compatibility helper
+      this.compatibilityHelper = new VideoCompatibilityHelper();
+      
+      // Set up video.js player
+      this.initializeVideoPlayer();
+      
+      // Set up event listeners
+      this.setupEventListeners();
+      
+      // Show landing page
+      if (this.ui.pages.landing) {
+        this.ui.pages.landing.style.display = "block";
+        console.log('Landing page displayed');
+      }
+    } catch (error) {
+      console.error('Initialization error:', error);
+      notyf.error("Failed to initialize application");
     }
-    
-    // Re-enable control emission after a delay
-    setTimeout(() => { allowEmit = true; }, 500);
-}
-
-// Helper function for generating random strings
-function randomString(length, chars) {
-    let result = '';
-    for (let i = length; i > 0; --i) {
-        result += chars[Math.floor(Math.random() * chars.length)];
-    }
-    return result;
-}
-
-// Format time for messages
-function time(state, username, context) {
-    let hours = Math.floor(context / 3600);
-    let minutes = Math.floor((context % 3600) / 60);
-    let seconds = Math.floor(context % 60);
-    
-    hours = hours < 10 ? "0" + hours : hours;
-    minutes = minutes < 10 ? "0" + minutes : minutes;
-    seconds = seconds < 10 ? "0" + seconds : seconds;
-    
-    let contentString = `${username} ${state} the video at ${minutes}:${seconds}`;
-    if (hours !== "00") {
-        contentString = `${username} ${state} the video at ${hours}:${minutes}:${seconds}`;
-    }
-    return contentString;
-}
-
-// Append message to chat
-function append(message) {
-    const messagesBox = document.getElementById("messages-box");
-    messagesBox.innerHTML += `
-        <div class="col-12 mt-3" id="message">
-            <span class="username" style="color: ${message.pfp}">${message.name}: </span>
-            ${message.content}
-        </div>
-    `;
-    messagesBox.scrollTop = messagesBox.scrollHeight;
-}
-
-// Append room data
-function appendData(roomName, roomCode) {
-    append({
-        name: "Local Party",
-        content: "Local Party allows you to watch local videos with your friends synchronously while chatting.",
-        pfp: "#f3dfbf"
-    });
-    append({
-        name: "Local Party",
-        content: `Welcome to ${roomName}`,
-        pfp: "#f3dfbf"
-    });
-    append({
-        name: "Local Party",
-        content: `Share the room code (${roomCode}) with others to invite them to the party.`,
-        pfp: "#f3dfbf"
-    });
-    append({
-        name: "Local Party",
-        content: "The video will be automatically shared with others who join.",
-        pfp: "#f3dfbf"
-    });
-}
-
-// Handle file selection
-function onChangeFile() {
-    const fileInput = document.getElementById("file-id");
-    if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
-    
-    videoFile = fileInput.files[0];
-    const url = URL.createObjectURL(videoFile);
-    
-    player.src({
-        src: url,
-        type: videoFile.type
-    });
-}
-
-// Video controls handler
-function videoControlsHandler(e) {
-    if (!allowEmit || !player || !mediaState.isReady) return;
-    
-    allowEmit = false;  // Prevent control echo
-    
+  }
+  
+  /**
+   * Initialize the video.js player
+   */
+  initializeVideoPlayer() {
     try {
-        const currentTime = player.currentTime();
-        console.log(`Sending ${e.type} command at time ${currentTime}`);
-        
-        const controlData = {
-            type: 'control',
-            action: e.type,
-            time: currentTime,
-            username: localStorage.getItem("username")
-        };
-        
-        // Send to all connected peers
-        Object.values(connections).forEach(conn => {
-            if (conn.open) {
-                conn.send(controlData);
-            }
+      // Configure global Video.js options
+      videojs.options.techOrder = ['html5'];
+      videojs.options.html5 = {
+        nativeVideoTracks: false,
+        nativeAudioTracks: false,
+        nativeTextTracks: false,
+        hls: { overrideNative: true }
+      };
+      
+      // Initialize player if it doesn't exist
+      if (!this.player) {
+        this.player = videojs('video-player', {
+          controls: true,
+          preload: 'auto',
+          fluid: true,
+          playsinline: true,
+          autoplay: false,
+          html5: {
+            vhs: {
+              overrideNative: true,
+              enableLowInitialPlaylist: true,
+            },
+            nativeVideoTracks: false,
+            nativeAudioTracks: false,
+            nativeTextTracks: false
+          }
         });
         
-        // Log local action
-        const content = time(e.type === 'play' ? "played" : "paused", "You", currentTime);
-        append({
-            name: "Local Party",
-            content: content,
-            pfp: "#f3dfbf"
-        });
-    } catch (e) {
-        console.error('Error in video controls handler:', e);
+        console.log('Video.js player initialized');
+        
+        // Add player event listeners
+        this.initializePlayerEvents();
+        
+        // Initially disable play button until we have data
+        if (this.player.controlBar && this.player.controlBar.playToggle) {
+          this.player.controlBar.playToggle.disable();
+        }
+      }
+    } catch (error) {
+      console.error('Video player initialization error:', error);
     }
-    
-    // Re-enable control emission after a delay
-    setTimeout(() => { allowEmit = true; }, 500);
-}
-
-// Additional video player event listeners
-function initializeVideoPlayerEvents() {
-    if (!player) return;
-    
-    // Handle seeking events
-    player.on('seeking', () => {
-        if (!allowEmit) return;
+  }
+  
+  /**
+   * Set up event listeners for player
+   */
+  initializePlayerEvents() {
+    // Wait until the player is ready
+    this.player.ready(() => {
+      // Play event
+      this.player.on('play', () => {
+        if (!this.allowEmit) return;
         
-        allowEmit = false;
-        const currentTime = player.currentTime();
-        removeOldBufferData(currentTime);
+        this.allowEmit = false;
+        const currentTime = this.player.currentTime();
         
-        Object.values(connections).forEach(conn => {
-            if (conn.open) {
-                conn.send({
-                    type: 'control',
-                    action: 'seek',
-                    time: currentTime,
-                    username: localStorage.getItem("username")
-                });
-            }
-        });
+        console.log('Play event at time:', currentTime);
         
-        setTimeout(() => { allowEmit = true; }, 500);
+        // Broadcast play event to all peers
+        this.broadcastVideoControl('play', currentTime);
+        
+        // Add a message in the chat
+        this.addLocalMessage(`You played the video at ${this.formatTime(currentTime)}`);
+        
+        // Re-enable control emission after a delay
+        setTimeout(() => { this.allowEmit = true; }, 500);
+      });
+      
+      // Pause event
+      this.player.on('pause', () => {
+        if (!this.allowEmit) return;
+        
+        this.allowEmit = false;
+        const currentTime = this.player.currentTime();
+        
+        console.log('Pause event at time:', currentTime);
+        
+        // Broadcast pause event to all peers
+        this.broadcastVideoControl('pause', currentTime);
+        
+        // Add a message in the chat
+        this.addLocalMessage(`You paused the video at ${this.formatTime(currentTime)}`);
+        
+        // Re-enable control emission after a delay
+        setTimeout(() => { this.allowEmit = true; }, 500);
+      });
+      
+      // Seeking event
+      this.player.on('seeking', () => {
+        if (!this.allowEmit) return;
+        
+        this.allowEmit = false;
+        const currentTime = this.player.currentTime();
+        
+        console.log('Seeking event to time:', currentTime);
+        
+        // Broadcast seek event to all peers
+        this.broadcastVideoControl('seek', currentTime);
+        
+        // Add a message in the chat
+        this.addLocalMessage(`You jumped to ${this.formatTime(currentTime)}`);
+        
+        // Re-enable control emission after a delay
+        setTimeout(() => { this.allowEmit = true; }, 1000);
+      });
+      
+      // Waiting event (buffering)
+      this.player.on('waiting', () => {
+        console.log('Video waiting for data');
+        
+        // If using a MediaSource and we have a mediaManager
+        if (this.mediaManager) {
+          this.mediaManager.handleBuffering();
+        }
+      });
+      
+      // Can play event
+      this.player.on('canplay', () => {
+        console.log('Video can play - enabling play button');
+        if (this.player.controlBar && this.player.controlBar.playToggle) {
+          this.player.controlBar.playToggle.enable();
+        }
+      });
+      
+      // Error event
+      this.player.on('error', (error) => {
+        console.error('Player error:', error);
+        if (this.mediaManager) {
+          this.mediaManager.handlePlaybackError();
+        }
+      });
     });
-    
-    // Handle buffering events
-player.on('waiting', () => {
-    console.log('Video waiting for data');
-    
-    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-        const currentTime = player.currentTime();
-        
-        // Log all buffer ranges
-        let hasValidRange = false;
-        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-            const start = sourceBuffer.buffered.start(i);
-            const end = sourceBuffer.buffered.end(i);
-            console.log(`Buffer range ${i}: ${start.toFixed(3)}s to ${end.toFixed(3)}s`);
-            
-            if (currentTime >= start && currentTime <= end) {
-                hasValidRange = true;
-            }
-        }
-        
-        if (!hasValidRange && pendingChunks.length > 0) {
-            console.log('Current time outside buffered ranges, processing more chunks');
-            processNextChunk();
-        }
-    }
-});
-    
-    // Handle playback errors
-    player.on('error', (error) => {
-        console.error('Video playback error:', error);
-        if (mediaSource && sourceBuffer && !sourceBuffer.updating) {
-            processNextChunk();
-        }
-    });
-}
-
-// Set up event listeners
-document.addEventListener("click", function(e) {
-    switch (e.target.id) {
+  }
+  
+  /**
+   * Set up event listeners for UI elements
+   */
+  setupEventListeners() {
+    // Navigation buttons
+    document.addEventListener("click", (e) => {
+      switch (e.target.id) {
         case "createRoomButton":
-            landingPage.style.display = "none";
-            createPage.style.display = "block";
-            break;
-            
-        case "roomCreateButton":
-            handleRoomCreate();
-            break;
-            
+          this.ui.pages.landing.style.display = "none";
+          this.ui.pages.create.style.display = "block";
+          break;
+          
         case "joinRoomButton":
-            landingPage.style.display = "none";
-            joinPage.style.display = "block";
-            const fileInput = document.getElementById("file-id");
-            if (fileInput) fileInput.style.display = "none";
-            break;
-            
+          this.ui.pages.landing.style.display = "none";
+          this.ui.pages.join.style.display = "block";
+          const fileInput = document.getElementById("file-id");
+          if (fileInput) fileInput.style.display = "none";
+          break;
+          
+        case "roomCreateButton":
+          this.handleRoomCreate();
+          break;
+          
         case "roomJoinButton":
-            handleRoomJoin();
-            break;
-            
+          this.handleRoomJoin();
+          break;
+          
         case "roomLeaveButton":
-            Object.values(connections).forEach(conn => conn.close());
-            peer.destroy();
-            location.reload();
-            break;
-            
+          this.leaveRoom();
+          break;
+          
         case "backButton":
-            joinPage.style.display = "none";
-            createPage.style.display = "none";
-            landingPage.style.display = "block";
-            break;
+          this.ui.pages.join.style.display = "none";
+          this.ui.pages.create.style.display = "none";
+          this.ui.pages.landing.style.display = "block";
+          break;
+      }
+    });
+    
+    // File input change
+    const fileInput = document.getElementById("file-id");
+    if (fileInput) {
+      fileInput.addEventListener("change", () => this.handleFileSelection());
     }
-});
-
-// Handle room creation
-function handleRoomCreate() {
+    
+    // Set up chat form handling
+    const form = document.getElementById("send-form");
+    if (form) {
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        this.sendChatMessage();
+      });
+    }
+    
+    // Make room code clickable for copying
+    if (this.ui.roomCodeText) {
+      this.ui.roomCodeText.addEventListener('click', () => {
+        const text = this.ui.roomCodeText.innerHTML;
+        navigator.clipboard.writeText(text)
+          .then(() => {
+            notyf.success("Room code copied to clipboard");
+          })
+          .catch(err => {
+            console.error('Failed to copy room code:', err);
+            notyf.error("Failed to copy room code");
+          });
+      });
+    }
+  }
+  
+  /**
+   * Handle room creation
+   */
+  handleRoomCreate() {
     const roomName = document.getElementById("roomname").value;
     const username = document.getElementById("create-username").value;
     
     if (!roomName || !username) {
-        document.getElementById("createRoomText").innerHTML = "Please fill in all fields";
-        return;
+      document.getElementById("createRoomText").innerHTML = "Please fill in all fields";
+      return;
     }
     
     const fileInput = document.getElementById("file-id");
     if (!fileInput || !fileInput.files || !fileInput.files[0]) {
-        document.getElementById("createRoomText").innerHTML = "Please select a video file";
-        return;
+      document.getElementById("createRoomText").innerHTML = "Please select a video file";
+      return;
     }
     
-    if (!videoFile) {
-        videoFile = fileInput.files[0];
-    }
-    
+    // Store user data
+    this.roomName = roomName;
+    this.username = username;
     localStorage.setItem("username", username);
     localStorage.setItem("roomName", roomName);
     
-    initializePeer(true);
+    // Check video compatibility
+    this.videoFile = fileInput.files[0];
+    const compatibilityResult = this.compatibilityHelper.checkFileCompatibility(this.videoFile);
     
-    document.getElementById("roomNameText").innerHTML = roomName;
+    if (!compatibilityResult.compatible) {
+      // Show warning but allow to continue
+      this.compatibilityHelper.showCompatibilityWarning({
+        format: this.videoFile.name.split('.').pop().toLowerCase(),
+        recommendedFormat: compatibilityResult.recommendedFormat
+      });
+    }
+    
+    // Initialize connection as host
+    this.isHost = true;
+    this.initializeConnection(true);
+    
+    // Update UI
+    this.ui.roomNameText.innerHTML = roomName;
     document.getElementById("createRoomText").innerHTML = "";
-    createPage.style.display = "none";
+    this.ui.pages.create.style.display = "none";
     document.title = `Local Party | ${roomName}`;
-    roomPage.style.display = "block";
+    this.ui.pages.room.style.display = "block";
     
-    appendData(roomName, peer.id);
-}
-
-// Handle room joining
-function handleRoomJoin() {
+    // Set up host video
+    this.setupHostVideo();
+    
+    // Add initial messages
+    this.appendRoomInfo(roomName, this.connectionManager.getHostId());
+  }
+  
+  /**
+   * Handle room joining
+   */
+  handleRoomJoin() {
     const hostPeerId = document.getElementById("roomCode").value;
     const username = document.getElementById("join-username").value;
     
     if (!hostPeerId || !username) {
-        document.getElementById("joinRoomText").innerHTML = "Please fill in all fields";
-        return;
+      document.getElementById("joinRoomText").innerHTML = "Please fill in all fields";
+      return;
     }
     
+    // Store user data
+    this.username = username;
     localStorage.setItem("username", username);
     
-    initializePeer(false);
+    // Initialize connection as guest
+    this.isHost = false;
+    this.initializeConnection(false, hostPeerId);
     
     // Clear any existing video
-    if (player) {
-        player.reset();
+    if (this.player) {
+      this.player.reset();
     }
-    videoFile = null;
+    this.videoFile = null;
     
-    peer.on('open', () => {
-        console.log('Connecting to host:', hostPeerId);
-        const conn = peer.connect(hostPeerId);
-        
-        conn.on('open', () => {
-            console.log('Connected to host successfully');
-            setupConnection(conn);
-            
-            conn.send({
-                type: 'video-request'
-            });
-            
-            document.getElementById("roomCodeText").innerHTML = hostPeerId;
-            joinPage.style.display = "none";
-            document.title = "Local Party | Room";
-            roomPage.style.display = "block";
-            appendData("Room", hostPeerId);
-        });
-        
-        conn.on('error', (err) => {
-            console.error('Connection error:', err);
-            document.getElementById("joinRoomText").innerHTML = "Failed to connect to room";
-            notyf.error("Failed to connect to room");
-        });
+    // Update UI
+    this.ui.roomCodeText.innerHTML = hostPeerId;
+    this.ui.pages.join.style.display = "none";
+    document.title = "Local Party | Room";
+    this.ui.pages.room.style.display = "block";
+    
+    // Add initial messages
+    this.appendRoomInfo("Room", hostPeerId);
+    this.addLocalMessage("Connecting to host...");
+  }
+  
+  /**
+   * Initialize P2P connection
+   */
+  initializeConnection(asHost, hostPeerId = null) {
+    // Initialize connection manager
+    this.connectionManager = new ConnectionManager(this, asHost, hostPeerId);
+    
+    // Initialize media manager if we're the host
+    if (asHost && this.videoFile) {
+      this.mediaManager = new MediaManager(this, this.videoFile);
+    }
+  }
+  
+  /**
+   * Set up video for host
+   */
+  setupHostVideo() {
+    if (!this.videoFile) return;
+    
+    // Create object URL for video
+    const url = URL.createObjectURL(this.videoFile);
+    
+    // Set player source
+    this.player.src({
+      src: url,
+      type: this.videoFile.type || 'video/mp4'
     });
-}
-
-// Set up chat form handling
-const form = document.getElementById("send-form");
-form.addEventListener('submit', (e) => {
-    e.preventDefault();
+    
+    // Add message
+    this.addLocalMessage(`Video loaded: ${this.videoFile.name}`);
+    
+    // Enable play button
+    if (this.player.controlBar && this.player.controlBar.playToggle) {
+      this.player.controlBar.playToggle.enable();
+    }
+  }
+  
+  /**
+   * Handle file selection
+   */
+  handleFileSelection() {
+    const fileInput = document.getElementById("file-id");
+    if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
+    
+    this.videoFile = fileInput.files[0];
+    console.log("Video file selected:", this.videoFile.name);
+    
+    // Check compatibility
+    const compatibilityResult = this.compatibilityHelper.checkFileCompatibility(this.videoFile);
+    
+    if (!compatibilityResult.compatible) {
+      this.compatibilityHelper.showCompatibilityWarning({
+        format: this.videoFile.name.split('.').pop().toLowerCase(),
+        recommendedFormat: compatibilityResult.recommendedFormat
+      });
+    }
+  }
+  
+  /**
+   * Send chat message
+   */
+  sendChatMessage() {
     const messageInput = document.getElementById("messageInp");
     const message = messageInput.value.trim();
     
     if (message) {
-        const chatData = {
-            type: 'chat',
-            username: localStorage.getItem("username"),
-            message: message,
-            pfp: localStorage.getItem("pfpUrl") || "#f3dfbf"
-        };
-        
-        Object.values(connections).forEach(conn => {
-            if (conn.open) {
-                conn.send(chatData);
-            }
-        });
-        
-        append({
-            name: localStorage.getItem("username"),
-            content: message,
-            pfp: localStorage.getItem("pfpUrl") || "#f3dfbf"
-        });
-        
-        messageInput.value = "";
+      // Create chat data
+      const chatData = {
+        type: 'chat',
+        username: this.username,
+        message: message,
+        timestamp: Date.now()
+      };
+      
+      // Send to all peers
+      this.connectionManager.broadcastMessage(chatData);
+      
+      // Add to local chat
+      this.addChatMessage(this.username, message, true);
+      
+      // Clear input field
+      messageInput.value = "";
     }
-});
-// Add better buffer monitoring
-function setupBufferMonitoring() {
-    if (!player) return;
+  }
+  
+  /**
+   * Add a chat message to the UI
+   */
+  addChatMessage(username, message, isSelf = false) {
+    const color = isSelf ? "#e0f7fa" : "#f3dfbf";
+    
+    this.ui.messagesBox.innerHTML += `
+      <div class="col-12 mt-3" id="message">
+        <span class="username" style="color: ${color}">${username}: </span>
+        ${this.escapeHtml(message)}
+      </div>
+    `;
+    
+    // Scroll to bottom
+    this.ui.messagesBox.scrollTop = this.ui.messagesBox.scrollHeight;
+  }
+  
+  /**
+   * Add a local system message
+   */
+  addLocalMessage(content) {
+    this.ui.messagesBox.innerHTML += `
+      <div class="col-12 mt-3" id="message">
+        <span class="username" style="color: #3498db">Local Party: </span>
+        ${content}
+      </div>
+    `;
+    
+    // Scroll to bottom
+    this.ui.messagesBox.scrollTop = this.ui.messagesBox.scrollHeight;
+  }
+  
+  /**
+   * Append room information to chat
+   */
+  appendRoomInfo(roomName, roomCode) {
+    this.addLocalMessage("Local Party allows you to watch local videos with your friends synchronously while chatting.");
+    this.addLocalMessage(`Welcome to ${roomName}`);
+    this.addLocalMessage(`Share the room code (${roomCode}) with others to invite them to the party.`);
+    this.addLocalMessage("The video will be automatically shared with others who join.");
+  }
+  
+  /**
+   * Broadcast video control event to all peers
+   */
+  broadcastVideoControl(action, time) {
+    // Create control data
+    const controlData = {
+      type: 'control',
+      action: action,
+      time: time,
+      username: this.username
+    };
+    
+    // Send to all peers
+    this.connectionManager.broadcastMessage(controlData);
+  }
+  
+  /**
+   * Handle incoming video control
+   */
+  handleVideoControl(data) {
+    if (!this.allowEmit || !this.player) return;
+    
+    this.allowEmit = false;  // Prevent echo
+    
+    try {
+      // Always sync time first if difference is significant
+      if (Math.abs(this.player.currentTime() - data.time) > CONFIG.SYNC_THRESHOLD) {
+        console.log(`Syncing time from ${this.player.currentTime()} to ${data.time}`);
+        this.player.currentTime(data.time);
+      }
+      
+      // Then handle play/pause action
+      if (data.action === 'play' && this.player.paused()) {
+        console.log('Remote play command received');
+        this.player.play().catch(e => console.error('Play failed:', e));
+        this.addLocalMessage(`${data.username} played the video at ${this.formatTime(data.time)}`);
+      } else if (data.action === 'pause' && !this.player.paused()) {
+        console.log('Remote pause command received');
+        this.player.pause();
+        this.addLocalMessage(`${data.username} paused the video at ${this.formatTime(data.time)}`);
+      } else if (data.action === 'seek') {
+        console.log(`Remote seek command received to ${data.time}`);
+        this.player.currentTime(data.time);
+        this.addLocalMessage(`${data.username} jumped to ${this.formatTime(data.time)}`);
+      }
+    } catch (e) {
+      console.error('Error handling video control:', e);
+    }
+    
+    // Re-enable control emission after a delay
+    setTimeout(() => { this.allowEmit = true; }, 500);
+  }
+  
+  /**
+   * Format time for messages (MM:SS or HH:MM:SS)
+   */
+  formatTime(seconds) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    const paddedMinutes = minutes < 10 ? "0" + minutes : minutes;
+    const paddedSeconds = secs < 10 ? "0" + secs : secs;
+    
+    if (hours > 0) {
+      const paddedHours = hours < 10 ? "0" + hours : hours;
+      return `${paddedHours}:${paddedMinutes}:${paddedSeconds}`;
+    } else {
+      return `${paddedMinutes}:${paddedSeconds}`;
+    }
+  }
+  
+  /**
+   * Leave the current room
+   */
+  leaveRoom() {
+    // Clean up connections
+    if (this.connectionManager) {
+      this.connectionManager.destroy();
+    }
+    
+    // Clean up media manager
+    if (this.mediaManager) {
+      this.mediaManager.destroy();
+    }
+    
+    // Clean up player
+    if (this.player) {
+      this.player.dispose();
+      this.player = null;
+    }
+    
+    // Reset state
+    this.videoFile = null;
+    
+    // Reload page to reset everything
+    location.reload();
+  }
+  
+  /**
+   * Escape HTML to prevent XSS in chat
+   */
+  escapeHtml(text) {
+    const map = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
+  }
+  
+  /**
+   * Update participant count in UI
+   */
+  updateParticipantCount(count) {
+    if (this.ui.peopleInParty) {
+      this.ui.peopleInParty.innerHTML = `<i class="fas fa-user-friends"></i> ${count}`;
+    }
+  }
+}
 
-    player.on('timeupdate', () => {
-        if (sourceBuffer && sourceBuffer.buffered.length > 0) {
-            const currentTime = player.currentTime();
-            const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-            const bufferAhead = bufferedEnd - currentTime;
-            
-            console.log(`Buffer status: ${bufferAhead.toFixed(2)}s ahead, ` +
-                      `${pendingChunks.length} chunks remaining, ` +
-                      `${receivedSize}/${expectedSize} bytes received`);
-            
-            // More aggressive chunk processing
-            if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-                processNextChunk();
-            }
-        }
+/**
+ * Connection Manager class
+ * Handles P2P connections using PeerJS
+ */
+class ConnectionManager {
+  constructor(app, asHost, hostId = null) {
+    this.app = app;
+    this.isHost = asHost;
+    this.hostId = hostId;
+    this.peer = null;
+    this.connections = {};
+    this.reconnectAttempts = {};
+    this.maxReconnectAttempts = CONFIG.MAX_RECONNECT_ATTEMPTS;
+    
+    // Initialize peer connection
+    this.initializePeer();
+  }
+  
+  /**
+   * Initialize PeerJS connection
+   */
+  initializePeer() {
+    // Generate peer ID if we're the host
+    const peerId = this.isHost ? this.generatePeerId() : undefined;
+    
+    // Create peer with configuration
+    this.peer = new Peer(peerId, CONFIG.PEER_CONFIG);
+    
+    // Set up peer events
+    this.setupPeerEvents();
+  }
+  
+  /**
+   * Set up PeerJS events
+   */
+  setupPeerEvents() {
+    // Connection opened
+    this.peer.on('open', (id) => {
+      console.log('Connected to PeerJS with ID:', id);
+      
+      if (this.isHost) {
+        this.hostId = id;
+        this.app.ui.roomCodeText.innerHTML = id;
+      } else if (this.hostId) {
+        // If we're not the host, connect to the host
+        this.connectToPeer(this.hostId);
+      }
     });
+    
+    // Incoming connection
+    this.peer.on('connection', (conn) => {
+      console.log('Incoming connection from:', conn.peer);
+      this.setupConnection(conn);
+    });
+    
+    // Error event
+    this.peer.on('error', (err) => {
+      console.error('PeerJS error:', err);
+      
+      if (err.type === 'peer-unavailable') {
+        notyf.error("The room you're trying to join doesn't exist");
+      } else if (err.type === 'network' || err.type === 'disconnected') {
+        notyf.error("Network error. Attempting to reconnect...");
+        this.attemptReconnect();
+      } else {
+        notyf.error("Connection error occurred");
+      }
+    });
+  }
+  
+  /**
+   * Set up peer connection
+   */
+  setupConnection(conn) {
+    this.connections[conn.peer] = conn;
+    this.reconnectAttempts[conn.peer] = 0;
+    
+    // Connection opened
+    conn.on('open', () => {
+      console.log('Connection opened to peer:', conn.peer);
+      
+      // If we're not the host, request the video
+      if (!this.isHost) {
+        conn.send({ type: 'video-request' });
+      }
+      
+      // Send user info
+      conn.send({
+        type: 'user-info',
+        username: this.app.username,
+        isHost: this.isHost
+      });
+      
+      // Update participant count
+      this.app.updateParticipantCount(Object.keys(this.connections).length + 1); // +1 for self
+    });
+    
+    // Data received
+    conn.on('data', (data) => {
+      console.log('Received data type:', data.type);
+      
+      try {
+        this.handleIncomingData(conn, data);
+      } catch (error) {
+        console.error('Error processing data:', error);
+      }
+    });
+    
+    // Connection closed
+    conn.on('close', () => {
+      this.handleConnectionClose(conn);
+    });
+    
+    // Connection error
+    conn.on('error', (err) => {
+      this.handleConnectionError(conn, err);
+    });
+  }
+  
+  /**
+   * Handle incoming data
+   */
+  handleIncomingData(conn, data) {
+    switch (data.type) {
+      case 'video-request':
+        if (this.isHost && this.app.videoFile) {
+          // If we're the host and have a video file, start streaming
+          if (this.app.mediaManager) {
+            this.app.mediaManager.startStreamingTo(conn);
+          }
+        }
+        break;
+        
+      case 'video-metadata':
+        // Initialize media manager for receiving video
+        if (!this.isHost && !this.app.mediaManager) {
+          this.app.mediaManager = new MediaManager(this.app);
+        }
+        
+        if (this.app.mediaManager) {
+          this.app.mediaManager.handleVideoMetadata(data);
+        }
+        break;
+        
+      case 'video-chunk':
+        if (this.app.mediaManager) {
+          this.app.mediaManager.handleVideoChunk(data);
+        }
+        break;
+        
+      case 'video-complete':
+        if (this.app.mediaManager) {
+          this.app.mediaManager.handleVideoComplete();
+        }
+        break;
+        
+      case 'chat':
+        this.app.addChatMessage(data.username, data.message);
+        break;
+        
+      case 'control':
+        this.app.handleVideoControl(data);
+        break;
+        
+      case 'user-info':
+        // Handle user info (username, etc.)
+        this.app.addLocalMessage(`${data.username} joined the room`);
+        break;
+    }
+  }
+  
+  /**
+   * Handle connection close
+   */
+  handleConnectionClose(conn) {
+    console.log('Connection closed:', conn.peer);
+    
+    // Remove from connections
+    delete this.connections[conn.peer];
+    
+    // Update UI
+    this.app.addLocalMessage("A user has disconnected.");
+    this.app.updateParticipantCount(Object.keys(this.connections).length + 1); // +1 for self
+  }
+  
+  /**
+   * Handle connection error
+   */
+  handleConnectionError(conn, err) {
+    console.error('Connection error:', err);
+    
+    // Remove from connections
+    delete this.connections[conn.peer];
+    
+    // Try to reconnect if we're not at the limit
+    if (this.reconnectAttempts[conn.peer] < this.maxReconnectAttempts) {
+      this.reconnectAttempts[conn.peer]++;
+      
+      setTimeout(() => {
+        this.connectToPeer(conn.peer);
+      }, 2000 * this.reconnectAttempts[conn.peer]); // Exponential backoff
+    } else {
+      notyf.error("Connection lost and could not be re-established");
+    }
+    
+    // Update UI
+    this.app.updateParticipantCount(Object.keys(this.connections).length + 1); // +1 for self
+  }
+  
+  /**
+   * Connect to a peer
+   */
+  connectToPeer(peerId) {
+    if (this.connections[peerId]) {
+      console.log('Already connected to', peerId);
+      return;
+    }
+    
+    console.log('Connecting to peer:', peerId);
+    
+    const conn = this.peer.connect(peerId, {
+      reliable: true,
+      serialization: 'binary'
+    });
+    
+    this.setupConnection(conn);
+    return conn;
+  }
+  
+  /**
+   * Attempt to reconnect after error
+   */
+  attemptReconnect() {
+    setTimeout(() => {
+      if (this.peer && !this.peer.destroyed) {
+        this.peer.reconnect();
+      } else {
+        // If peer is destroyed, create a new one
+        this.initializePeer();
+      }
+    }, 3000);
+  }
+  
+  /**
+   * Broadcast message to all connected peers
+   */
+  broadcastMessage(message) {
+    Object.values(this.connections).forEach(conn => {
+      if (conn.open) {
+        conn.send(message);
+      }
+    });
+  }
+  
+  /**
+   * Generate random peer ID
+   */
+  generatePeerId(length = 6) {
+    const chars = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+      result += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return result;
+  }
+  
+  /**
+   * Get host ID
+   */
+  getHostId() {
+    return this.hostId;
+  }
+  
+  /**
+   * Clean up and destroy the PeerJS connection
+   */
+  destroy() {
+    // Close all connections
+    Object.values(this.connections).forEach(conn => {
+      if (conn.open) {
+        conn.close();
+      }
+    });
+    
+    // Destroy the peer object
+    if (this.peer && !this.peer.destroyed) {
+      this.peer.destroy();
+    }
+    
+    // Reset state
+    this.connections = {};
+    this.reconnectAttempts = {};
+  }
 }
 
-function logBufferStatus() {
-    if (!sourceBuffer || !player) return;
+/**
+ * Media Manager class
+ * Handles video streaming using chunks and MSE
+ */
+class MediaManager {
+  constructor(app, videoFile = null) {
+    this.app = app;
+    this.videoFile = videoFile;
+    this.mediaSource = null;
+    this.sourceBuffer = null;
+    this.pendingChunks = [];
+    this.receivedChunks = [];
+    this.receivedSize = 0;
+    this.expectedSize = 0;
+    this.videoType = '';
+    this.isProcessing = false;
+    this.dynamicChunkSize = CONFIG.CHUNK_SIZE;
+    this.transferStartTime = 0;
+    this.lastTransferTime = 0;
+    this.transferSpeed = 0;
+    this.bufferTimeout = null;
     
-    const videoElement = player.tech().el();
-    console.log("--- Buffer Status Check ---");
-    
-    // Log SourceBuffer ranges
-    if (sourceBuffer.buffered.length > 0) {
-        console.log("SourceBuffer ranges:");
-        for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-            const start = sourceBuffer.buffered.start(i);
-            const end = sourceBuffer.buffered.end(i);
-            console.log(`Range ${i}: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
-        }
-    }
-    
-    // Log Video Element ranges
-    if (videoElement.buffered.length > 0) {
-        console.log("Video Element ranges:");
-        for (let i = 0; i < videoElement.buffered.length; i++) {
-            const start = videoElement.buffered.start(i);
-            const end = videoElement.buffered.end(i);
-            console.log(`Range ${i}: ${start.toFixed(2)}s to ${end.toFixed(2)}s`);
-        }
-    }
-}
-// Set up room code click-to-copy
-document.getElementById('roomCodeText').addEventListener('click', () => {
-    const text = document.getElementById('roomCodeText').innerHTML;
-    navigator.clipboard.writeText(text)
-        .then(() => {
-            notyf.success("Room code copied to clipboard");
-        })
-        .catch(err => {
-            console.error('Failed to copy room code:', err);
-            notyf.error("Failed to copy room code");
-        });
-});
+    // Create a video element for compatibility testing
+    this.testVideoElement = document.createElement('video');
+  }
