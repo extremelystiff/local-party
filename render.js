@@ -16,17 +16,15 @@ const CONFIG = {
     config: {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' }
-
-// Initialize the application when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-  window.localParty = new LocalParty();
-});,
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' }
       ]
     }
   }
-  
+  // Initialize the application when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+  window.localParty = new LocalParty();
+});,
   /**
    * Handle room creation
    */
