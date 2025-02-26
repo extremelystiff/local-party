@@ -150,10 +150,7 @@ class VideoCompatibilityHelper {
 // Initialize the application when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
   window.localParty = new LocalParty();
-});},
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' }
-      ]
+});
     /**
    * Start streaming video to a peer
    */
