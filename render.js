@@ -15,14 +15,379 @@ const CONFIG = {
     debug: 1,
     config: {
       iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun.l.google.com:19302' }
+
+// Initialize the application when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+  window.localParty = new LocalParty();
+});,
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' }
-      ] // This closing bracket might be missing in your code
+      ]
     }
   }
+  
+  /**
+   * Handle room creation
+   */
+  handleRoomCreate() {
+    const roomName = document.getElementById("roomname").value;
+    const username = document.getElementById("create-username").value;
+    
+    if (!roomName || !username) {
+      document.getElementById("createRoomText").innerHTML = "Please fill in all fields";
+      return;
+    }
+    
+    const fileInput = document.getElementById("file-id");
+    if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+      document.getElementById("createRoomText").innerHTML = "Please select a video file";
+      return;
+    }
+    
+    // Store user data
+    this.roomName = roomName;
+    this.username = username;
+    localStorage.setItem("username", username);
+    localStorage.setItem("roomName", roomName);
+    
+    // Check video compatibility
+    this.videoFile = fileInput.files[0];
+    const compatibilityResult = this.compatibilityHelper.checkFileCompatibility(this.videoFile);
+    
+    if (!compatibilityResult.compatible) {
+      // Show warning but allow to continue
+      this.compatibilityHelper.showCompatibilityWarning({
+        format: this.videoFile.name.split('.').pop().toLowerCase(),
+        recommendedFormat: compatibilityResult.recommendedFormat
+      });
+    }
+    
+    // Initialize connection as host
+    this.isHost = true;
+    this.initializeConnection(true);
+    
+    // Update UI
+    this.ui.roomNameText.innerHTML = roomName;
+    document.getElementById("createRoomText").innerHTML = "";
+    this.ui.pages.create.style.display = "none";
+    document.title = `Local Party | ${roomName}`;
+    this.ui.pages.room.style.display = "block";
+    
+    // Set up host video
+    this.setupHostVideo();
+    
+    // Add initial messages
+    this.appendRoomInfo(roomName, this.connectionManager.getHostId());
+  }
+  
+  /**
+   * Handle room joining
+   */
+  handleRoomJoin() {
+    const hostPeerId = document.getElementById("roomCode").value;
+    const username = document.getElementById("join-username").value;
+    
+    if (!hostPeerId || !username) {
+      document.getElementById("joinRoomText").innerHTML = "Please fill in all fields";
+      return;
+    }
+    
+    // Store user data
+    this.username = username;
+    localStorage.setItem("username", username);
+    
+    // Initialize connection as guest
+    this.isHost = false;
+    this.initializeConnection(false, hostPeerId);
+    
+    // Clear any existing video
+    if (this.player) {
+      this.player.reset();
+    }
+    this.videoFile = null;
+    
+    // Update UI
+    this.ui.roomCodeText.innerHTML = hostPeerId;
+    this.ui.pages.join.style.display = "none";
+    document.title = "Local Party | Room";
+    this.ui.pages.room.style.display = "block";
+    
+    // Add initial messages
+    this.appendRoomInfo("Room", hostPeerId);
+    this.addLocalMessage("Connecting to host...");
+  }
+  
+  /**
+   * Initialize P2P connection
+   */
+  initializeConnection(asHost, hostPeerId = null) {
+    // Initialize connection manager
+    this.connectionManager = new ConnectionManager(this, asHost, hostPeerId);
+    
+    // Initialize media manager if we're the host
+    if (asHost && this.videoFile) {
+      this.mediaManager = new MediaManager(this, this.videoFile);
+    }
+  }
+  
+  /**
+   * Set up video for host
+   */
+  setupHostVideo() {
+    if (!this.videoFile) return;
+    
+    // Create object URL for video
+    const url = URL.createObjectURL(this.videoFile);
+    
+    // Set player source
+    this.player.src({
+      src: url,
+      type: this.videoFile.type || 'video/mp4'
+    });
+    
+    // Add message
+    this.addLocalMessage(`Video loaded: ${this.videoFile.name}`);
+    
+    // Enable play button
+    if (this.player.controlBar && this.player.controlBar.playToggle) {
+      this.player.controlBar.playToggle.enable();
+    }
+  }
+  
+  /**
+   * Handle file selection
+   */
+  handleFileSelection() {
+    const fileInput = document.getElementById("file-id");
+    if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
+    
+    this.videoFile = fileInput.files[0];
+    console.log("Video file selected:", this.videoFile.name);
+    
+    // Check compatibility
+    const compatibilityResult = this.compatibilityHelper.checkFileCompatibility(this.videoFile);
+    
+    if (!compatibilityResult.compatible) {
+      this.compatibilityHelper.showCompatibilityWarning({
+        format: this.videoFile.name.split('.').pop().toLowerCase(),
+        recommendedFormat: compatibilityResult.recommendedFormat
+      });
+    }
+  }
+  
+  /**
+   * Send chat message
+   */
+  sendChatMessage() {
+    const messageInput = document.getElementById("messageInp");
+    const message = messageInput.value.trim();
+    
+    if (message) {
+      // Create chat data
+      const chatData = {
+        type: 'chat',
+        username: this.username,
+        message: message,
+        timestamp: Date.now()
+      };
+      
+      // Send to all peers
+      this.connectionManager.broadcastMessage(chatData);
+      
+      // Add to local chat
+      this.addChatMessage(this.username, message, true);
+      
+      // Clear input field
+      messageInput.value = "";
+    }
+  }
+  
+  /**
+   * Add a chat message to the UI
+   */
+  addChatMessage(username, message, isSelf = false) {
+    const color = isSelf ? "#e0f7fa" : "#f3dfbf";
+    
+    this.ui.messagesBox.innerHTML += `
+      <div class="col-12 mt-3" id="message">
+        <span class="username" style="color: ${color}">${username}: </span>
+        ${this.escapeHtml(message)}
+      </div>
+    `;
+    
+    // Scroll to bottom
+    this.ui.messagesBox.scrollTop = this.ui.messagesBox.scrollHeight;
+  }
+  
+  /**
+   * Add a local system message
+   */
+  addLocalMessage(content) {
+    this.ui.messagesBox.innerHTML += `
+      <div class="col-12 mt-3" id="message">
+        <span class="username" style="color: #3498db">Local Party: </span>
+        ${content}
+      </div>
+    `;
+    
+    // Scroll to bottom
+    this.ui.messagesBox.scrollTop = this.ui.messagesBox.scrollHeight;
+  }
+  
+  /**
+   * Append room information to chat
+   */
+  appendRoomInfo(roomName, roomCode) {
+    this.addLocalMessage("Local Party allows you to watch local videos with your friends synchronously while chatting.");
+    this.addLocalMessage(`Welcome to ${roomName}`);
+    this.addLocalMessage(`Share the room code (${roomCode}) with others to invite them to the party.`);
+    this.addLocalMessage("The video will be automatically shared with others who join.");
+  }
+  
+  /**
+   * Broadcast video control event to all peers
+   */
+  broadcastVideoControl(action, time) {
+    // Create control data
+    const controlData = {
+      type: 'control',
+      action: action,
+      time: time,
+      username: this.username
+    };
+    
+    // Send to all peers
+    this.connectionManager.broadcastMessage(controlData);
+  }
+  
+  /**
+   * Handle incoming video control
+   */
+  handleVideoControl(data) {
+    if (!this.allowEmit || !this.player) return;
+    
+    this.allowEmit = false;  // Prevent echo
+    
+    try {
+      // Always sync time first if difference is significant
+      if (Math.abs(this.player.currentTime() - data.time) > CONFIG.SYNC_THRESHOLD) {
+        console.log(`Syncing time from ${this.player.currentTime()} to ${data.time}`);
+        this.player.currentTime(data.time);
+      }
+      
+      // Then handle play/pause action
+      if (data.action === 'play' && this.player.paused()) {
+        console.log('Remote play command received');
+        this.player.play().catch(e => console.error('Play failed:', e));
+        this.addLocalMessage(`${data.username} played the video at ${this.formatTime(data.time)}`);
+      } else if (data.action === 'pause' && !this.player.paused()) {
+        console.log('Remote pause command received');
+        this.player.pause();
+        this.addLocalMessage(`${data.username} paused the video at ${this.formatTime(data.time)}`);
+      } else if (data.action === 'seek') {
+        console.log(`Remote seek command received to ${data.time}`);
+        this.player.currentTime(data.time);
+        this.addLocalMessage(`${data.username} jumped to ${this.formatTime(data.time)}`);
+      }
+    } catch (e) {
+      console.error('Error handling video control:', e);
+    }
+    
+    // Re-enable control emission after a delay
+    setTimeout(() => { this.allowEmit = true; }, 500);
+  }
+  
+  /**
+   * Format time for messages (MM:SS or HH:MM:SS)
+   */
+  formatTime(seconds) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    const paddedMinutes = minutes < 10 ? "0" + minutes : minutes;
+    const paddedSeconds = secs < 10 ? "0" + secs : secs;
+    
+    if (hours > 0) {
+      const paddedHours = hours < 10 ? "0" + hours : hours;
+      return `${paddedHours}:${paddedMinutes}:${paddedSeconds}`;
+    } else {
+      return `${paddedMinutes}:${paddedSeconds}`;
+    }
+  }
+  
+  /**
+   * Leave the current room
+   */
+  leaveRoom() {
+    // Clean up connections
+    if (this.connectionManager) {
+      this.connectionManager.destroy();
+    }
+    
+    // Clean up media manager
+    if (this.mediaManager) {
+      this.mediaManager.destroy();
+    }
+    
+    // Clean up player
+    if (this.player) {
+      this.player.dispose();
+      this.player = null;
+    }
+    
+    // Reset state
+    this.videoFile = null;
+    
+    // Reload page to reset everything
+    location.reload();
+  }
+  
+  /**
+   * Escape HTML to prevent XSS in chat
+   */
+  escapeHtml(text) {
+    const map = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
+  }
+  
+  /**
+   * Update participant count in UI
+   */
+  updateParticipantCount(count) {
+    if (this.ui.peopleInParty) {
+      this.ui.peopleInParty.innerHTML = `<i class="fas fa-user-friends"></i> ${count}`;
+    }
+  }
+}
 };
-        /**
+
+// Initialize Notyf for notifications
+const notyf = new Notyf({ 
+  duration: 2000, 
+  position: { x: 'center', y: 'top' },
+  types: [
+    {
+      type: 'warning',
+      background: '#FFA500',
+      duration: 3000
+    },
+    {
+      type: 'info',
+      background: '#3498db',
+      duration: 2000
+    }
+  ]
+});
+
+/**
  * Video Compatibility Helper
  * Detects browser support for various video formats
  */
@@ -135,7 +500,7 @@ class VideoCompatibilityHelper {
     `;
     
     // Add to the UI near the video player
-    const container = document.querySelector('.video-player-container');
+    const container = document.querySelector('.video-player-conatiner');
     if (container) {
       container.appendChild(warningDiv);
       
@@ -147,11 +512,33 @@ class VideoCompatibilityHelper {
   }
 }
 
-// Initialize the application when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-  window.localParty = new LocalParty();
-});
-    /**
+/**
+ * Media Manager class
+ * Handles video streaming using chunks and MSE
+ */
+class MediaManager {
+  constructor(app, videoFile = null) {
+    this.app = app;
+    this.videoFile = videoFile;
+    this.mediaSource = null;
+    this.sourceBuffer = null;
+    this.pendingChunks = [];
+    this.receivedChunks = [];
+    this.receivedSize = 0;
+    this.expectedSize = 0;
+    this.videoType = '';
+    this.isProcessing = false;
+    this.dynamicChunkSize = CONFIG.CHUNK_SIZE;
+    this.transferStartTime = 0;
+    this.lastTransferTime = 0;
+    this.transferSpeed = 0;
+    this.bufferTimeout = null;
+    
+    // Create a video element for compatibility testing
+    this.testVideoElement = document.createElement('video');
+  }
+
+  /**
    * Start streaming video to a peer
    */
   async startStreamingTo(conn) {
@@ -760,637 +1147,6 @@ document.addEventListener('DOMContentLoaded', () => {
     this.mediaSource = null;
   }
 }
-  }
-};
-
-// Initialize Notyf for notifications
-const notyf = new Notyf({ 
-  duration: 2000, 
-  position: { x: 'center', y: 'top' },
-  types: [
-    {
-      type: 'warning',
-      background: '#FFA500',
-      duration: 3000
-    },
-    {
-      type: 'info',
-      background: '#3498db',
-      duration: 2000
-    }
-  ]
-});
-
-/**
- * Main application class
- */
-class LocalParty {
-  constructor() {
-    // App state
-    this.isHost = false;
-    this.connectionManager = null;
-    this.mediaManager = null;
-    this.videoFile = null;
-    this.roomName = '';
-    this.username = '';
-    this.compatibilityHelper = null;
-    this.allowEmit = true;
-    
-    // UI elements
-    this.ui = {
-      pages: {
-        landing: document.getElementById("landing"),
-        create: document.getElementById("create"),
-        join: document.getElementById("join"),
-        room: document.getElementById("room")
-      },
-      videoPlayer: document.getElementById("video-player"),
-      messagesBox: document.getElementById("messages-box"),
-      roomNameText: document.getElementById("roomNameText"),
-      roomCodeText: document.getElementById("roomCodeText"),
-      peopleInParty: document.getElementById("pplinparty")
-    };
-    
-    // Initialize the app
-    this.init();
-  }
-  
-  /**
-   * Initialize the application
-   */
-  init() {
-    console.log('Initializing Local Party application...');
-    
-    try {
-      // Initialize format compatibility helper
-      this.compatibilityHelper = new VideoCompatibilityHelper();
-      
-      // Set up video.js player
-      this.initializeVideoPlayer();
-      
-      // Set up event listeners
-      this.setupEventListeners();
-      
-      // Show landing page
-      if (this.ui.pages.landing) {
-        this.ui.pages.landing.style.display = "block";
-        console.log('Landing page displayed');
-      }
-    } catch (error) {
-      console.error('Initialization error:', error);
-      notyf.error("Failed to initialize application");
-    }
-  }
-  
-  /**
-   * Initialize the video.js player
-   */
-  initializeVideoPlayer() {
-    try {
-      // Configure global Video.js options
-      videojs.options.techOrder = ['html5'];
-      videojs.options.html5 = {
-        nativeVideoTracks: false,
-        nativeAudioTracks: false,
-        nativeTextTracks: false,
-        hls: { overrideNative: true }
-      };
-      
-      // Initialize player if it doesn't exist
-      if (!this.player) {
-        this.player = videojs('video-player', {
-          controls: true,
-          preload: 'auto',
-          fluid: true,
-          playsinline: true,
-          autoplay: false,
-          html5: {
-            vhs: {
-              overrideNative: true,
-              enableLowInitialPlaylist: true,
-            },
-            nativeVideoTracks: false,
-            nativeAudioTracks: false,
-            nativeTextTracks: false
-          }
-        });
-        
-        console.log('Video.js player initialized');
-        
-        // Add player event listeners
-        this.initializePlayerEvents();
-        
-        // Initially disable play button until we have data
-        if (this.player.controlBar && this.player.controlBar.playToggle) {
-          this.player.controlBar.playToggle.disable();
-        }
-      }
-    } catch (error) {
-      console.error('Video player initialization error:', error);
-    }
-  }
-  
-  /**
-   * Set up event listeners for player
-   */
-  initializePlayerEvents() {
-    // Wait until the player is ready
-    this.player.ready(() => {
-      // Play event
-      this.player.on('play', () => {
-        if (!this.allowEmit) return;
-        
-        this.allowEmit = false;
-        const currentTime = this.player.currentTime();
-        
-        console.log('Play event at time:', currentTime);
-        
-        // Broadcast play event to all peers
-        this.broadcastVideoControl('play', currentTime);
-        
-        // Add a message in the chat
-        this.addLocalMessage(`You played the video at ${this.formatTime(currentTime)}`);
-        
-        // Re-enable control emission after a delay
-        setTimeout(() => { this.allowEmit = true; }, 500);
-      });
-      
-      // Pause event
-      this.player.on('pause', () => {
-        if (!this.allowEmit) return;
-        
-        this.allowEmit = false;
-        const currentTime = this.player.currentTime();
-        
-        console.log('Pause event at time:', currentTime);
-        
-        // Broadcast pause event to all peers
-        this.broadcastVideoControl('pause', currentTime);
-        
-        // Add a message in the chat
-        this.addLocalMessage(`You paused the video at ${this.formatTime(currentTime)}`);
-        
-        // Re-enable control emission after a delay
-        setTimeout(() => { this.allowEmit = true; }, 500);
-      });
-      
-      // Seeking event
-      this.player.on('seeking', () => {
-        if (!this.allowEmit) return;
-        
-        this.allowEmit = false;
-        const currentTime = this.player.currentTime();
-        
-        console.log('Seeking event to time:', currentTime);
-        
-        // Broadcast seek event to all peers
-        this.broadcastVideoControl('seek', currentTime);
-        
-        // Add a message in the chat
-        this.addLocalMessage(`You jumped to ${this.formatTime(currentTime)}`);
-        
-        // Re-enable control emission after a delay
-        setTimeout(() => { this.allowEmit = true; }, 1000);
-      });
-      
-      // Waiting event (buffering)
-      this.player.on('waiting', () => {
-        console.log('Video waiting for data');
-        
-        // If using a MediaSource and we have a mediaManager
-        if (this.mediaManager) {
-          this.mediaManager.handleBuffering();
-        }
-      });
-      
-      // Can play event
-      this.player.on('canplay', () => {
-        console.log('Video can play - enabling play button');
-        if (this.player.controlBar && this.player.controlBar.playToggle) {
-          this.player.controlBar.playToggle.enable();
-        }
-      });
-      
-      // Error event
-      this.player.on('error', (error) => {
-        console.error('Player error:', error);
-        if (this.mediaManager) {
-          this.mediaManager.handlePlaybackError();
-        }
-      });
-    });
-  }
-  
-  /**
-   * Set up event listeners for UI elements
-   */
-  setupEventListeners() {
-    // Navigation buttons
-    document.addEventListener("click", (e) => {
-      switch (e.target.id) {
-        case "createRoomButton":
-          this.ui.pages.landing.style.display = "none";
-          this.ui.pages.create.style.display = "block";
-          break;
-          
-        case "joinRoomButton":
-          this.ui.pages.landing.style.display = "none";
-          this.ui.pages.join.style.display = "block";
-          const fileInput = document.getElementById("file-id");
-          if (fileInput) fileInput.style.display = "none";
-          break;
-          
-        case "roomCreateButton":
-          this.handleRoomCreate();
-          break;
-          
-        case "roomJoinButton":
-          this.handleRoomJoin();
-          break;
-          
-        case "roomLeaveButton":
-          this.leaveRoom();
-          break;
-          
-        case "backButton":
-          this.ui.pages.join.style.display = "none";
-          this.ui.pages.create.style.display = "none";
-          this.ui.pages.landing.style.display = "block";
-          break;
-      }
-    });
-    
-    // File input change
-    const fileInput = document.getElementById("file-id");
-    if (fileInput) {
-      fileInput.addEventListener("change", () => this.handleFileSelection());
-    }
-    
-    // Set up chat form handling
-    const form = document.getElementById("send-form");
-    if (form) {
-      form.addEventListener('submit', (e) => {
-        e.preventDefault();
-        this.sendChatMessage();
-      });
-    }
-    
-    // Make room code clickable for copying
-    if (this.ui.roomCodeText) {
-      this.ui.roomCodeText.addEventListener('click', () => {
-        const text = this.ui.roomCodeText.innerHTML;
-        navigator.clipboard.writeText(text)
-          .then(() => {
-            notyf.success("Room code copied to clipboard");
-          })
-          .catch(err => {
-            console.error('Failed to copy room code:', err);
-            notyf.error("Failed to copy room code");
-          });
-      });
-    }
-  }
-  
-  /**
-   * Handle room creation
-   */
-  handleRoomCreate() {
-    const roomName = document.getElementById("roomname").value;
-    const username = document.getElementById("create-username").value;
-    
-    if (!roomName || !username) {
-      document.getElementById("createRoomText").innerHTML = "Please fill in all fields";
-      return;
-    }
-    
-    const fileInput = document.getElementById("file-id");
-    if (!fileInput || !fileInput.files || !fileInput.files[0]) {
-      document.getElementById("createRoomText").innerHTML = "Please select a video file";
-      return;
-    }
-    
-    // Store user data
-    this.roomName = roomName;
-    this.username = username;
-    localStorage.setItem("username", username);
-    localStorage.setItem("roomName", roomName);
-    
-    // Check video compatibility
-    this.videoFile = fileInput.files[0];
-    const compatibilityResult = this.compatibilityHelper.checkFileCompatibility(this.videoFile);
-    
-    if (!compatibilityResult.compatible) {
-      // Show warning but allow to continue
-      this.compatibilityHelper.showCompatibilityWarning({
-        format: this.videoFile.name.split('.').pop().toLowerCase(),
-        recommendedFormat: compatibilityResult.recommendedFormat
-      });
-    }
-    
-    // Initialize connection as host
-    this.isHost = true;
-    this.initializeConnection(true);
-    
-    // Update UI
-    this.ui.roomNameText.innerHTML = roomName;
-    document.getElementById("createRoomText").innerHTML = "";
-    this.ui.pages.create.style.display = "none";
-    document.title = `Local Party | ${roomName}`;
-    this.ui.pages.room.style.display = "block";
-    
-    // Set up host video
-    this.setupHostVideo();
-    
-    // Add initial messages
-    this.appendRoomInfo(roomName, this.connectionManager.getHostId());
-  }
-  
-  /**
-   * Handle room joining
-   */
-  handleRoomJoin() {
-    const hostPeerId = document.getElementById("roomCode").value;
-    const username = document.getElementById("join-username").value;
-    
-    if (!hostPeerId || !username) {
-      document.getElementById("joinRoomText").innerHTML = "Please fill in all fields";
-      return;
-    }
-    
-    // Store user data
-    this.username = username;
-    localStorage.setItem("username", username);
-    
-    // Initialize connection as guest
-    this.isHost = false;
-    this.initializeConnection(false, hostPeerId);
-    
-    // Clear any existing video
-    if (this.player) {
-      this.player.reset();
-    }
-    this.videoFile = null;
-    
-    // Update UI
-    this.ui.roomCodeText.innerHTML = hostPeerId;
-    this.ui.pages.join.style.display = "none";
-    document.title = "Local Party | Room";
-    this.ui.pages.room.style.display = "block";
-    
-    // Add initial messages
-    this.appendRoomInfo("Room", hostPeerId);
-    this.addLocalMessage("Connecting to host...");
-  }
-  
-  /**
-   * Initialize P2P connection
-   */
-  initializeConnection(asHost, hostPeerId = null) {
-    // Initialize connection manager
-    this.connectionManager = new ConnectionManager(this, asHost, hostPeerId);
-    
-    // Initialize media manager if we're the host
-    if (asHost && this.videoFile) {
-      this.mediaManager = new MediaManager(this, this.videoFile);
-    }
-  }
-  
-  /**
-   * Set up video for host
-   */
-  setupHostVideo() {
-    if (!this.videoFile) return;
-    
-    // Create object URL for video
-    const url = URL.createObjectURL(this.videoFile);
-    
-    // Set player source
-    this.player.src({
-      src: url,
-      type: this.videoFile.type || 'video/mp4'
-    });
-    
-    // Add message
-    this.addLocalMessage(`Video loaded: ${this.videoFile.name}`);
-    
-    // Enable play button
-    if (this.player.controlBar && this.player.controlBar.playToggle) {
-      this.player.controlBar.playToggle.enable();
-    }
-  }
-  
-  /**
-   * Handle file selection
-   */
-  handleFileSelection() {
-    const fileInput = document.getElementById("file-id");
-    if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
-    
-    this.videoFile = fileInput.files[0];
-    console.log("Video file selected:", this.videoFile.name);
-    
-    // Check compatibility
-    const compatibilityResult = this.compatibilityHelper.checkFileCompatibility(this.videoFile);
-    
-    if (!compatibilityResult.compatible) {
-      this.compatibilityHelper.showCompatibilityWarning({
-        format: this.videoFile.name.split('.').pop().toLowerCase(),
-        recommendedFormat: compatibilityResult.recommendedFormat
-      });
-    }
-  }
-  
-  /**
-   * Send chat message
-   */
-  sendChatMessage() {
-    const messageInput = document.getElementById("messageInp");
-    const message = messageInput.value.trim();
-    
-    if (message) {
-      // Create chat data
-      const chatData = {
-        type: 'chat',
-        username: this.username,
-        message: message,
-        timestamp: Date.now()
-      };
-      
-      // Send to all peers
-      this.connectionManager.broadcastMessage(chatData);
-      
-      // Add to local chat
-      this.addChatMessage(this.username, message, true);
-      
-      // Clear input field
-      messageInput.value = "";
-    }
-  }
-  
-  /**
-   * Add a chat message to the UI
-   */
-  addChatMessage(username, message, isSelf = false) {
-    const color = isSelf ? "#e0f7fa" : "#f3dfbf";
-    
-    this.ui.messagesBox.innerHTML += `
-      <div class="col-12 mt-3" id="message">
-        <span class="username" style="color: ${color}">${username}: </span>
-        ${this.escapeHtml(message)}
-      </div>
-    `;
-    
-    // Scroll to bottom
-    this.ui.messagesBox.scrollTop = this.ui.messagesBox.scrollHeight;
-  }
-  
-  /**
-   * Add a local system message
-   */
-  addLocalMessage(content) {
-    this.ui.messagesBox.innerHTML += `
-      <div class="col-12 mt-3" id="message">
-        <span class="username" style="color: #3498db">Local Party: </span>
-        ${content}
-      </div>
-    `;
-    
-    // Scroll to bottom
-    this.ui.messagesBox.scrollTop = this.ui.messagesBox.scrollHeight;
-  }
-  
-  /**
-   * Append room information to chat
-   */
-  appendRoomInfo(roomName, roomCode) {
-    this.addLocalMessage("Local Party allows you to watch local videos with your friends synchronously while chatting.");
-    this.addLocalMessage(`Welcome to ${roomName}`);
-    this.addLocalMessage(`Share the room code (${roomCode}) with others to invite them to the party.`);
-    this.addLocalMessage("The video will be automatically shared with others who join.");
-  }
-  
-  /**
-   * Broadcast video control event to all peers
-   */
-  broadcastVideoControl(action, time) {
-    // Create control data
-    const controlData = {
-      type: 'control',
-      action: action,
-      time: time,
-      username: this.username
-    };
-    
-    // Send to all peers
-    this.connectionManager.broadcastMessage(controlData);
-  }
-  
-  /**
-   * Handle incoming video control
-   */
-  handleVideoControl(data) {
-    if (!this.allowEmit || !this.player) return;
-    
-    this.allowEmit = false;  // Prevent echo
-    
-    try {
-      // Always sync time first if difference is significant
-      if (Math.abs(this.player.currentTime() - data.time) > CONFIG.SYNC_THRESHOLD) {
-        console.log(`Syncing time from ${this.player.currentTime()} to ${data.time}`);
-        this.player.currentTime(data.time);
-      }
-      
-      // Then handle play/pause action
-      if (data.action === 'play' && this.player.paused()) {
-        console.log('Remote play command received');
-        this.player.play().catch(e => console.error('Play failed:', e));
-        this.addLocalMessage(`${data.username} played the video at ${this.formatTime(data.time)}`);
-      } else if (data.action === 'pause' && !this.player.paused()) {
-        console.log('Remote pause command received');
-        this.player.pause();
-        this.addLocalMessage(`${data.username} paused the video at ${this.formatTime(data.time)}`);
-      } else if (data.action === 'seek') {
-        console.log(`Remote seek command received to ${data.time}`);
-        this.player.currentTime(data.time);
-        this.addLocalMessage(`${data.username} jumped to ${this.formatTime(data.time)}`);
-      }
-    } catch (e) {
-      console.error('Error handling video control:', e);
-    }
-    
-    // Re-enable control emission after a delay
-    setTimeout(() => { this.allowEmit = true; }, 500);
-  }
-  
-  /**
-   * Format time for messages (MM:SS or HH:MM:SS)
-   */
-  formatTime(seconds) {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    
-    const paddedMinutes = minutes < 10 ? "0" + minutes : minutes;
-    const paddedSeconds = secs < 10 ? "0" + secs : secs;
-    
-    if (hours > 0) {
-      const paddedHours = hours < 10 ? "0" + hours : hours;
-      return `${paddedHours}:${paddedMinutes}:${paddedSeconds}`;
-    } else {
-      return `${paddedMinutes}:${paddedSeconds}`;
-    }
-  }
-  
-  /**
-   * Leave the current room
-   */
-  leaveRoom() {
-    // Clean up connections
-    if (this.connectionManager) {
-      this.connectionManager.destroy();
-    }
-    
-    // Clean up media manager
-    if (this.mediaManager) {
-      this.mediaManager.destroy();
-    }
-    
-    // Clean up player
-    if (this.player) {
-      this.player.dispose();
-      this.player = null;
-    }
-    
-    // Reset state
-    this.videoFile = null;
-    
-    // Reload page to reset everything
-    location.reload();
-  }
-  
-  /**
-   * Escape HTML to prevent XSS in chat
-   */
-  escapeHtml(text) {
-    const map = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#039;'
-    };
-    return text.replace(/[&<>"']/g, m => map[m]);
-  }
-  
-  /**
-   * Update participant count in UI
-   */
-  updateParticipantCount(count) {
-    if (this.ui.peopleInParty) {
-      this.ui.peopleInParty.innerHTML = `<i class="fas fa-user-friends"></i> ${count}`;
-    }
-  }
-}
 
 /**
  * Connection Manager class
@@ -1688,27 +1444,271 @@ class ConnectionManager {
 }
 
 /**
- * Media Manager class
- * Handles video streaming using chunks and MSE
+ * Main application class
  */
-class MediaManager {
-  constructor(app, videoFile = null) {
-    this.app = app;
-    this.videoFile = videoFile;
-    this.mediaSource = null;
-    this.sourceBuffer = null;
-    this.pendingChunks = [];
-    this.receivedChunks = [];
-    this.receivedSize = 0;
-    this.expectedSize = 0;
-    this.videoType = '';
-    this.isProcessing = false;
-    this.dynamicChunkSize = CONFIG.CHUNK_SIZE;
-    this.transferStartTime = 0;
-    this.lastTransferTime = 0;
-    this.transferSpeed = 0;
-    this.bufferTimeout = null;
+class LocalParty {
+  constructor() {
+    // App state
+    this.isHost = false;
+    this.connectionManager = null;
+    this.mediaManager = null;
+    this.videoFile = null;
+    this.roomName = '';
+    this.username = '';
+    this.compatibilityHelper = null;
+    this.allowEmit = true;
     
-    // Create a video element for compatibility testing
-    this.testVideoElement = document.createElement('video');
+    // UI elements
+    this.ui = {
+      pages: {
+        landing: document.getElementById("landing"),
+        create: document.getElementById("create"),
+        join: document.getElementById("join"),
+        room: document.getElementById("room")
+      },
+      videoPlayer: document.getElementById("video-player"),
+      messagesBox: document.getElementById("messages-box"),
+      roomNameText: document.getElementById("roomNameText"),
+      roomCodeText: document.getElementById("roomCodeText"),
+      peopleInParty: document.getElementById("pplinparty")
+    };
+    
+    // Initialize the app
+    this.init();
+  }
+  
+  /**
+   * Initialize the application
+   */
+  init() {
+    console.log('Initializing Local Party application...');
+    
+    try {
+      // Initialize format compatibility helper
+      this.compatibilityHelper = new VideoCompatibilityHelper();
+      
+      // Set up video.js player
+      this.initializeVideoPlayer();
+      
+      // Set up event listeners
+      this.setupEventListeners();
+      
+      // Show landing page
+      if (this.ui.pages.landing) {
+        this.ui.pages.landing.style.display = "block";
+        console.log('Landing page displayed');
+      }
+    } catch (error) {
+      console.error('Initialization error:', error);
+      notyf.error("Failed to initialize application");
+    }
+  }
+  
+  /**
+   * Initialize the video.js player
+   */
+  initializeVideoPlayer() {
+    try {
+      // Configure global Video.js options
+      videojs.options.techOrder = ['html5'];
+      videojs.options.html5 = {
+        nativeVideoTracks: false,
+        nativeAudioTracks: false,
+        nativeTextTracks: false,
+        hls: { overrideNative: true }
+      };
+      
+      // Initialize player if it doesn't exist
+      if (!this.player) {
+        this.player = videojs('video-player', {
+          controls: true,
+          preload: 'auto',
+          fluid: true,
+          playsinline: true,
+          autoplay: false,
+          html5: {
+            vhs: {
+              overrideNative: true,
+              enableLowInitialPlaylist: true,
+            },
+            nativeVideoTracks: false,
+            nativeAudioTracks: false,
+            nativeTextTracks: false
+          }
+        });
+        
+        console.log('Video.js player initialized');
+        
+        // Add player event listeners
+        this.initializePlayerEvents();
+        
+        // Initially disable play button until we have data
+        if (this.player.controlBar && this.player.controlBar.playToggle) {
+          this.player.controlBar.playToggle.disable();
+        }
+      }
+    } catch (error) {
+      console.error('Video player initialization error:', error);
+    }
+  }
+  
+  /**
+   * Set up event listeners for player
+   */
+  initializePlayerEvents() {
+    // Wait until the player is ready
+    this.player.ready(() => {
+      // Play event
+      this.player.on('play', () => {
+        if (!this.allowEmit) return;
+        
+        this.allowEmit = false;
+        const currentTime = this.player.currentTime();
+        
+        console.log('Play event at time:', currentTime);
+        
+        // Broadcast play event to all peers
+        this.broadcastVideoControl('play', currentTime);
+        
+        // Add a message in the chat
+        this.addLocalMessage(`You played the video at ${this.formatTime(currentTime)}`);
+        
+        // Re-enable control emission after a delay
+        setTimeout(() => { this.allowEmit = true; }, 500);
+      });
+      
+      // Pause event
+      this.player.on('pause', () => {
+        if (!this.allowEmit) return;
+        
+        this.allowEmit = false;
+        const currentTime = this.player.currentTime();
+        
+        console.log('Pause event at time:', currentTime);
+        
+        // Broadcast pause event to all peers
+        this.broadcastVideoControl('pause', currentTime);
+        
+        // Add a message in the chat
+        this.addLocalMessage(`You paused the video at ${this.formatTime(currentTime)}`);
+        
+        // Re-enable control emission after a delay
+        setTimeout(() => { this.allowEmit = true; }, 500);
+      });
+      
+      // Seeking event
+      this.player.on('seeking', () => {
+        if (!this.allowEmit) return;
+        
+        this.allowEmit = false;
+        const currentTime = this.player.currentTime();
+        
+        console.log('Seeking event to time:', currentTime);
+        
+        // Broadcast seek event to all peers
+        this.broadcastVideoControl('seek', currentTime);
+        
+        // Add a message in the chat
+        this.addLocalMessage(`You jumped to ${this.formatTime(currentTime)}`);
+        
+        // Re-enable control emission after a delay
+        setTimeout(() => { this.allowEmit = true; }, 1000);
+      });
+      
+      // Waiting event (buffering)
+      this.player.on('waiting', () => {
+        console.log('Video waiting for data');
+        
+        // If using a MediaSource and we have a mediaManager
+        if (this.mediaManager) {
+          this.mediaManager.handleBuffering();
+        }
+      });
+      
+      // Can play event
+      this.player.on('canplay', () => {
+        console.log('Video can play - enabling play button');
+        if (this.player.controlBar && this.player.controlBar.playToggle) {
+          this.player.controlBar.playToggle.enable();
+        }
+      });
+      
+      // Error event
+      this.player.on('error', (error) => {
+        console.error('Player error:', error);
+        if (this.mediaManager) {
+          this.mediaManager.handlePlaybackError();
+        }
+      });
+    });
+  }
+  
+  /**
+   * Set up event listeners for UI elements
+   */
+  setupEventListeners() {
+    // Navigation buttons
+    document.addEventListener("click", (e) => {
+      switch (e.target.id) {
+        case "createRoomButton":
+          this.ui.pages.landing.style.display = "none";
+          this.ui.pages.create.style.display = "block";
+          break;
+          
+        case "joinRoomButton":
+          this.ui.pages.landing.style.display = "none";
+          this.ui.pages.join.style.display = "block";
+          const fileInput = document.getElementById("file-id");
+          if (fileInput) fileInput.style.display = "none";
+          break;
+          
+        case "roomCreateButton":
+          this.handleRoomCreate();
+          break;
+          
+        case "roomJoinButton":
+          this.handleRoomJoin();
+          break;
+          
+        case "roomLeaveButton":
+          this.leaveRoom();
+          break;
+          
+        case "backButton":
+          this.ui.pages.join.style.display = "none";
+          this.ui.pages.create.style.display = "none";
+          this.ui.pages.landing.style.display = "block";
+          break;
+      }
+    });
+    
+    // File input change
+    const fileInput = document.getElementById("file-id");
+    if (fileInput) {
+      fileInput.addEventListener("change", () => this.handleFileSelection());
+    }
+    
+    // Set up chat form handling
+    const form = document.getElementById("send-form");
+    if (form) {
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        this.sendChatMessage();
+      });
+    }
+    
+    // Make room code clickable for copying
+    if (this.ui.roomCodeText) {
+      this.ui.roomCodeText.addEventListener('click', () => {
+        const text = this.ui.roomCodeText.innerHTML;
+        navigator.clipboard.writeText(text)
+          .then(() => {
+            notyf.success("Room code copied to clipboard");
+          })
+          .catch(err => {
+            console.error('Failed to copy room code:', err);
+            notyf.error("Failed to copy room code");
+          });
+      });
+    }
   }
